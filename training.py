@@ -2,37 +2,35 @@ import torch
 import torch.nn as nn
 import os
 from torch.utils.data import Dataset, DataLoader
+from dataclasses import asdict
 
 def train_sock_generator(
     generator: nn.Module, 
     sock_extractor: nn.Module, 
-    dataloader: DataLoader, 
+    dataloader: torch.utils.data.DataLoader, 
     device: str, 
-    total_steps: int = 100000, 
-    resample_freq: int = 100,
-    save_freq: int = 10000,                  # <--- New parameter
-    save_dir: str = "../results/models"      # <--- Relative path based on your structure
+    cfg,            # <--- Receive config
+    writer          # <--- Receive TensorBoard writer
 ):
-    # Ensure the save directory exists
-    os.makedirs(save_dir, exist_ok=True)     # <--- Create folder if it doesn't exist
+    # Use config for training parameters
+    os.makedirs(cfg.train.save_dir, exist_ok=True)     
     
     generator.to(device)
     sock_extractor.to(device)
     
-    # Optimizer and Scheduler 
-    optimizer = torch.optim.AdamW(generator.parameters(), lr=3e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(generator.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
     
-    # Warmup + Decay schedule over total_steps
-    warmup_steps = int(0.05 * total_steps)
+    warmup_steps = int(0.05 * cfg.train.total_steps)
     
     def lr_lambda(current_step):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        return max(0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps)))
+        return max(0.0, float(cfg.train.total_steps - current_step) / float(max(1, cfg.train.total_steps - warmup_steps)))
         
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     generator.train()
+
     # 1. Extract a single batch to fit the input scales for the augmented paths
     x_minus_sample, x_plus_sample = next(iter(dataloader))
     real_joined_sample = torch.cat([x_minus_sample, x_plus_sample], dim=1).to(device)
@@ -45,9 +43,9 @@ def train_sock_generator(
     step_count = 0
     data_iter = iter(dataloader)
     
-    print(f"Starting training for {total_steps} steps...")
+    print(f"Starting training for {cfg.train.total_steps} steps...")
     
-    while step_count < total_steps:
+    while step_count < cfg.train.total_steps:
         try:
             x_minus, x_plus = next(data_iter)
         except StopIteration:
@@ -57,7 +55,7 @@ def train_sock_generator(
         x_minus, x_plus = x_minus.to(device), x_plus.to(device)
         
         # The Resampling Trick
-        if step_count > 0 and step_count % resample_freq == 0:
+        if step_count > 0 and step_count % cfg.train.resample_freq == 0:
             sock_extractor.resample()
             sock_extractor.fit_ft_scales(dataloader, device)
         
@@ -85,28 +83,29 @@ def train_sock_generator(
         
         loss_history.append(loss.item())
         step_count += 1
+
+        if step_count % cfg.train.log_freq == 0:
+            writer.add_scalar("Loss/train", loss.item(), step_count)
+            writer.add_scalar("LearningRate/train", scheduler.get_last_lr()[0], step_count)
         
         # --- NEW: Model Checkpointing Logic ---
-        if step_count % save_freq == 0:
-            save_path = os.path.join(save_dir, f"generator_step_{step_count}.pt")
+        if step_count % cfg.train.save_freq == 0:
+            save_path = os.path.join(cfg.train.save_dir, f"generator_step_{step_count}.pt")
             
-            # Saving a dictionary is best practice so you can resume training later if needed
             torch.save({
                 'step': step_count,
                 'generator_state_dict': generator.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': loss.item(),
+                'config': asdict(cfg),
             }, save_path)
             
             print(f"Checkpoint saved to {save_path}")
         # --------------------------------------
-        
-        if step_count % 1000 == 0:
-            print(f"Step {step_count}/{total_steps} | Loss: {loss.item():.6f} | LR: {scheduler.get_last_lr()[0]:.6f}")
             
     # Save a final model at the very end just to be safe
-    final_save_path = os.path.join(save_dir, "generator_final.pt")
+    final_save_path = os.path.join(cfg.train.save_dir, "generator_final.pt")
     torch.save(generator.state_dict(), final_save_path)
     print(f"Training complete. Final model saved to {final_save_path}")
             

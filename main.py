@@ -1,44 +1,60 @@
+import torch
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+import os
+
 from SOCK import *
 from data_loader import *
 from training import *
 from utils import *
+from config import Config
 
-seed_everything(42)
+# 1. Instantiate the config
+cfg = Config()
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
+seed_everything(cfg.seed)
 
+device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 print(f"Using device: {device}")
 
-# 1. Simulate data (d=2) [cite: 1247-1250]
-sim = JumpDiffusionSimulator(d=3)
+cfg.train.tb_dir = os.path.join(cfg.train.tb_base_dir, cfg.train.experiment_name)
+cfg.train.save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
+
+# 2. Setup TensorBoard Writer
+# This will create a folder called 'runs' where all your loss data is stored permanently
+writer = SummaryWriter(log_dir=cfg.train.tb_dir)
+
+# 3. Simulate data (using config!)
+sim = JumpDiffusionSimulator(d=cfg.model.d)
 hist_path = sim.simulate(H=2048)
 
-# 2. Create dataset & loader
-q_len, T_len = 5, 64
-dataset = FinancialTimeSeriesDataset(hist_path, q=q_len, T=T_len)
-dataloader = DataLoader(dataset, batch_size=256, shuffle=True, drop_last=True)
+# 4. Create dataset & loader (using config!)
+dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
+dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
 
-# 3. Instantiate models
-# T_total is q + T
-sock = SOCKFeatureMap(d=3, T_total=q_len + T_len) 
-gen = ConditionalGenerator(d=3, q=q_len, hidden_dim=128)
+# 5. Instantiate models (using config!)
+sock = SOCKFeatureMap(
+    d=cfg.model.d, 
+    T_total=cfg.model.q_len + cfg.model.T_len,
+    tau=cfg.model.tau,
+    K=cfg.model.K,
+    M=cfg.model.M,
+    W=cfg.model.W,
+    L=cfg.model.L
+) 
+gen = ConditionalGenerator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
 
-SAVE_DIR = "../results/test"
-
-# 4. Train
+# 6. Train
 print("Starting generator training via SOCK feature matching...")
+# Notice we pass the 'writer' and 'cfg' into the training function now
 loss_hist = train_sock_generator(
     generator=gen, 
     sock_extractor=sock, 
     dataloader=dataloader, 
     device=device, 
-    total_steps=100,     # <--- Changed to match the paper exactly
-    resample_freq=100,      # Resample every 100 steps as per the paper
-    save_freq=100,
-    save_dir=SAVE_DIR
+    cfg=cfg,             # <--- Pass config down
+    writer=writer        # <--- Pass TensorBoard writer down
 )
+
+# Close the writer when done
+writer.close()

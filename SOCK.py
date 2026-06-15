@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+import math
 
 def normalize_kernel_(w: torch.Tensor, eps: float = 1e-6):
     """Zero-centers and L1-normalizes random kernels[cite: 1138]."""
@@ -82,24 +83,34 @@ class SOCKFeatureMap(nn.Module):
         all_feats = torch.cat(all_feats, dim=0)
         self.ft_mean = all_feats.mean(dim=0, keepdim=True)
         self.ft_std = all_feats.std(dim=0, keepdim=True) + 1e-8
+    
+    def fit_input_scales(self, x: torch.Tensor):
+        """Fits empirical mean and std of the augmented paths[cite: 1129, 1210]."""
+        x_aug = self.augment(x)
+        # Compute over Batch (dim=0) and Time (dim=1)
+        self.input_mean = x_aug.mean(dim=(0, 1), keepdim=True)
+        self.input_std = x_aug.std(dim=(0, 1), keepdim=True) + 1e-6
 
-    def forward(self, x: torch.Tensor, scale: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, scale: bool = False) -> torch.Tensor:
         B, T_steps, _ = x.shape
         x_aug = self.augment(x)
         
-        # Project and permute for Conv1d: (B, M, T_steps) [cite: 1217]
-        x_proj = self.proj(x_aug).permute(0, 2, 1)
+        # Apply normalization to augmented features BEFORE projection [cite: 1130, 1217]
+        if hasattr(self, 'input_mean') and self.input_mean is not None:
+            x_aug = (x_aug - self.input_mean) / self.input_std
+            
+        # Random projection
+        y = self.proj(x_aug) # (B, T, M)
+        y = y.permute(0, 2, 1) # (B, M, T)
         
         feats = []
         for conv in self.convs:
-            # z shape: (B, groups * K, T_steps)
-            z = conv(x_proj)
-            # Reshape for competition: (B, groups, K, T_steps) [cite: 1220]
+            z = conv(y) 
             z = z.view(B, self.groups, self.K, T_steps)
             
-            # Soft-deviation pooling [cite: 1150, 1213]
+            # Soft-deviation pooling (unbiased=False matches the 1/T formula [cite: 1151])
             win_probs = torch.softmax(z / self.tau, dim=2)
-            f = torch.std(win_probs, dim=-1) # (B, groups, K)
+            f = torch.std(win_probs, dim=-1, unbiased=False) 
             feats.append(f.view(B, -1))
             
         out = torch.cat(feats, dim=1)

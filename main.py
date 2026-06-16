@@ -33,16 +33,16 @@ dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T
 dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
 
 # 5. Instantiate models (using config!)
-sock = SOCKFeatureMap(
-    d=cfg.model.d, 
-    T_total=cfg.model.q_len + cfg.model.T_len,
+sock = SOCK(
+    n_steps=cfg.model.q_len + cfg.model.T_len,
+    n_channels=cfg.model.d,
     tau=cfg.model.tau,
-    K=cfg.model.K,
-    M=cfg.model.M,
-    W=cfg.model.W,
-    L=cfg.model.L
+    k=cfg.model.K,
+    mix_dim=cfg.model.M,
+    kernel_len=cfg.model.L,
+    augs=("cumsum", "posneg")  # Paper specifies both for generative tasks
 ) 
-gen = ConditionalGenerator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
+gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
 
 # 6. Train
 print("Starting generator training via SOCK feature matching...")

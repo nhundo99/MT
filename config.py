@@ -23,7 +23,7 @@ class TrainConfig:
     log_freq: int = 10          # Save stats to TensorBoard
     save_freq: int = 10000      # Save the heavy model weights
     
-    experiment_name: str = "sock_experiment_1"
+    experiment_name: str = "sock_experiment_2"
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
     

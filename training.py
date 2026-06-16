@@ -62,7 +62,7 @@ def train_sock_generator(
         optimizer.zero_grad()
         
         # Forward pass
-        x_hat_plus = generator(x_minus, T=x_plus.size(1))
+        x_hat_plus = generator(x_minus, n_steps=x_plus.size(1))
         
         # Joined Segments
         real_joined = torch.cat([x_minus, x_plus], dim=1)

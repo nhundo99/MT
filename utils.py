@@ -19,7 +19,8 @@ def plot_full_autoregressive_rollout(
     generator: torch.nn.Module, 
     dataset, 
     device: str, 
-    path_tensor: torch.Tensor
+    path_tensor: torch.Tensor,
+    save_path: str = None
 ):
     """
     Plots the full simulated ground truth path alongside a full-length 
@@ -43,7 +44,7 @@ def plot_full_autoregressive_rollout(
     with torch.no_grad():
         while steps_generated < H:
             # Generate the next T steps
-            next_T = generator(current_context, T=T) # Shape: (1, T, d)
+            next_T = generator(current_context, n_steps=T) # Shape: (1, T, d)
             
             # Store the generated chunk
             generated_chunks.append(next_T.squeeze(0).cpu().numpy())
@@ -82,7 +83,11 @@ def plot_full_autoregressive_rollout(
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.show()
+
+    if save_path is not None:
+        # bbox_inches='tight' ensures that no axis labels or legends get cut off in the PDF
+        plt.savefig(save_path, format='pdf', bbox_inches='tight')
+        print(f"Saved plot to: {save_path}")
 
 def seed_everything(seed: int = 42):
     """Locks all random seeds for perfect reproducibility."""

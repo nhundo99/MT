@@ -20,15 +20,18 @@ class TrainConfig:
     weight_decay: float = 0.01
     total_steps: int = 100000
     resample_freq: int = 100
-    log_freq: int = 10          # Save stats to TensorBoard
-    save_freq: int = 10000      # Save the heavy model weights
+    log_freq: int = 10          
+    save_freq: int = 10000      
     
-    experiment_name: str = "sock_experiment_2"
+    experiment_name: str = "sock_experiment_1"
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
     
     tb_dir: str = "" 
     save_dir: str = ""
+    
+    # --- NEW: Add dataset path ---
+    dataset_path: str = "data/jump_diffusion_data.pt"
 
 @dataclass
 class Config:

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import os
 
 from SOCK import Generator
-from data_loader import JumpDiffusionSimulator, FinancialTimeSeriesDataset
+from data_loader import FinancialTimeSeriesDataset
 from config import Config
 from utils import seed_everything
 
@@ -13,23 +13,19 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
-    # 1. Prepare data and simulator
-    sim = JumpDiffusionSimulator(d=cfg.model.d)
-    hist_path = sim.simulate(H=2048)
-    dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
+    # 1. Load data
+    print(f"Loading dataset from {cfg.train.dataset_path}...")
+    data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
+    train_path = data_dict["train_path"]
+    test_paths = data_dict["test_paths"] # Shape: (J, N, d)
     
+    dataset = FinancialTimeSeriesDataset(train_path, q=cfg.model.q_len, T=cfg.model.T_len)
     mean = dataset.mean.squeeze().cpu().numpy()
     std = dataset.std.squeeze().cpu().numpy()
     
-    print("Calculating Ground Truth Quantiles...")
-    # Extract all real future paths of length T from the dataset to calculate empirical real drift
-    real_paths = []
-    for i in range(len(dataset)):
-        _, x_plus = dataset[i]
-        real_paths.append(x_plus.cpu().numpy())
-        
-    real_paths = np.array(real_paths) # Shape: (N, T, d)
-    real_returns = real_paths * std + mean
+    print("Calculating Ground Truth Quantiles from Continuations...")
+    # Because we're predicting horizon T, we extract the first T steps of each out-of-sample path
+    real_returns = test_paths[:, :cfg.model.T_len, :].numpy() # (2048, T, d)
     real_cum_returns = np.cumsum(real_returns, axis=1) # Cumulative sum = log prices
     
     # Ground Truth Quantiles
@@ -45,13 +41,12 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     
-    num_samples = 5000 # Number of paths to simulate for a robust distribution
+    num_samples = test_paths.size(0) # J = 2048
     
-    # We will use the very first context in the dataset to condition our generated futures
-    context = dataset.scaled_path[:cfg.model.q_len].unsqueeze(0).to(device)
+    # Condition generation on the very end of the training data
+    context = dataset.scaled_path[-cfg.model.q_len:].unsqueeze(0).to(device)
     batched_context = context.repeat(num_samples, 1, 1)
 
-    # Add the final model to the list of checkpoints to plot
     checkpoints = [(step, f"generator_step_{step}.pt") for step in checkpoints_to_plot]
     checkpoints.append(("Final", "generator_final.pt"))
 
@@ -61,8 +56,6 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
             continue
             
         print(f"Analyzing drift for checkpoint {step_label}...")
-        
-        # Handle the state_dict depending on if it's an intermediate dict or final weights
         checkpoint = torch.load(ckpt_path, map_location=device)
         if 'generator_state_dict' in checkpoint:
             gen.load_state_dict(checkpoint['generator_state_dict'])
@@ -71,22 +64,19 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
             
         gen.eval()
         
-        # 3. Generate multiple futures for the same context
+        # 3. Generate multiple futures
         with torch.no_grad():
-            generated_scaled = gen(batched_context, n_steps=cfg.model.T_len) # (1000, T, d)
+            generated_scaled = gen(batched_context, n_steps=cfg.model.T_len)
             
         generated_returns = generated_scaled.cpu().numpy() * std + mean
-        cum_log_returns = np.cumsum(generated_returns, axis=1) # (1000, T, d)
+        cum_log_returns = np.cumsum(generated_returns, axis=1) 
         
-        # Model Quantiles
         mod_q05 = np.percentile(cum_log_returns, 5, axis=0)
         mod_q15 = np.percentile(cum_log_returns, 15, axis=0)
         mod_q50 = np.percentile(cum_log_returns, 50, axis=0)
         mod_q85 = np.percentile(cum_log_returns, 85, axis=0)
         mod_q95 = np.percentile(cum_log_returns, 95, axis=0)
 
-        # Calculate annualized drift (assuming 252 trading days per year)
-        # Drift = (Cumulative Return at step T / T) * 252
         real_annualized_drift = (real_q50[-1, 0] / cfg.model.T_len) * 252
         model_annualized_drift = (mod_q50[-1, 0] / cfg.model.T_len) * 252
         drift_bias = model_annualized_drift - real_annualized_drift
@@ -96,15 +86,13 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         print(f"Model Annualized Drift: {model_annualized_drift:.4f}")
         print(f"Drift Bias (Model - Real): {drift_bias:.4f}")
         
-        # 4. Plotting for Asset 1 (Index 0)
+        # 4. Plotting for Asset 1
         plt.figure(figsize=(8, 5))
         time_steps = np.arange(1, cfg.model.T_len + 1)
         
-        # Plot Model Bands
         plt.fill_between(time_steps, mod_q05[:, 0], mod_q95[:, 0], color='#4C72B0', alpha=0.2, label='Model $Q_{0.05} - Q_{0.95}$')
         plt.fill_between(time_steps, mod_q15[:, 0], mod_q85[:, 0], color='#4C72B0', alpha=0.4, label='Model $Q_{0.15} - Q_{0.85}$')
         
-        # Plot Real Bands as lines
         plt.plot(time_steps, real_q05[:, 0], color='black', linestyle=':', linewidth=1.5, label='Real $Q_{0.05} - Q_{0.95}$')
         plt.plot(time_steps, real_q95[:, 0], color='black', linestyle=':', linewidth=1.5)
         plt.plot(time_steps, real_q15[:, 0], color='black', linestyle='--', linewidth=1.5, label='Real $Q_{0.15} - Q_{0.85}$')
@@ -123,7 +111,6 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         save_path = os.path.join(plot_dir, f"drift_analysis_step_{step_label}.pdf")
         plt.savefig(save_path, format='pdf', bbox_inches='tight')
         plt.close()
-        print(f"Saved drift analysis plot to {save_path}")
 
 if __name__ == "__main__":
     analyze_cumulative_drift()

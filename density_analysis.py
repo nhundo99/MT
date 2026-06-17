@@ -5,7 +5,7 @@ import os
 from scipy.stats import gaussian_kde
 
 from SOCK import Generator
-from data_loader import JumpDiffusionSimulator, FinancialTimeSeriesDataset
+from data_loader import FinancialTimeSeriesDataset
 from config import Config
 from utils import seed_everything
 
@@ -14,29 +14,21 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
-    # 1. Prepare data and simulator
-    sim = JumpDiffusionSimulator(d=cfg.model.d)
-    hist_path = sim.simulate(H=2048)
-    dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
+    # 1. Load data
+    print(f"Loading dataset from {cfg.train.dataset_path}...")
+    data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
+    train_path = data_dict["train_path"]
+    test_paths = data_dict["test_paths"] # Shape: (J, N, d) = (2048, 2048, d)
     
+    # We still use the dataset object to access the train path's standardizer
+    dataset = FinancialTimeSeriesDataset(train_path, q=cfg.model.q_len, T=cfg.model.T_len)
     mean = dataset.mean.squeeze().cpu().numpy()
     std = dataset.std.squeeze().cpu().numpy()
     
-    print("Extracting Ground Truth Returns...")
-    # Extract all real future paths to get the true marginal distribution of returns
-    real_paths = []
-    for i in range(len(dataset)):
-        _, x_plus = dataset[i]
-        real_paths.append(x_plus.cpu().numpy())
-        
-    real_paths = np.array(real_paths) # Shape: (N, T, d)
-    real_returns = real_paths * std + mean
-    
-    # Flatten the real returns for the first channel to get the overall distribution
-    # (If you want to look at a specific time horizon instead of all steps, remove the flatten and slice by time)
-    real_returns_flat = real_returns[:, :, 0].flatten()
+    print("Extracting Ground Truth Returns from independent continuations...")
+    # The true marginal is perfectly represented by flattening the out-of-sample test paths
+    real_returns_flat = test_paths[:, :, 0].numpy().flatten()
 
-    # Calculate smooth KDE for real data
     kde_real = gaussian_kde(real_returns_flat)
     x_grid = np.linspace(np.min(real_returns_flat), np.max(real_returns_flat), 1000)
     pdf_real = kde_real(x_grid)
@@ -47,8 +39,11 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     
-    num_samples = 5000 # Generate 1000 paths for a robust distribution density
-    context = dataset.scaled_path[:cfg.model.q_len].unsqueeze(0).to(device)
+    num_samples = test_paths.size(0) # Exactly J=2048 to match the real continuations
+    
+    # To evaluate out-of-sample conditional generation correctly, we condition on the very end 
+    # of the training path (the exact boundary before out-of-sample data begins).
+    context = dataset.scaled_path[-cfg.model.q_len:].unsqueeze(0).to(device)
     batched_context = context.repeat(num_samples, 1, 1)
 
     checkpoints = [(step, f"generator_step_{step}.pt") for step in checkpoints_to_plot]
@@ -61,7 +56,6 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
             
         print(f"Plotting probability density for checkpoint {step_label}...")
         
-        # Load weights
         checkpoint = torch.load(ckpt_path, map_location=device)
         if 'generator_state_dict' in checkpoint:
             gen.load_state_dict(checkpoint['generator_state_dict'])
@@ -76,17 +70,13 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         generated_returns = generated_scaled.cpu().numpy() * std + mean
         generated_returns_flat = generated_returns[:, :, 0].flatten()
         
-        # Calculate smooth KDE for generated data
         kde_gen = gaussian_kde(generated_returns_flat)
-        pdf_gen = kde_gen(x_grid) # Evaluate on the exact same x_grid as the real data
+        pdf_gen = kde_gen(x_grid) 
 
         # 4. Plotting
         plt.figure(figsize=(8, 5))
-        
-        # Fill under the curves for better visual comparison (similar to the paper)
         plt.fill_between(x_grid, pdf_real, color='gray', alpha=0.3)
         plt.plot(x_grid, pdf_real, color='black', linestyle='--', linewidth=2, label='Real Data Density')
-        
         plt.fill_between(x_grid, pdf_gen, color='#4C72B0', alpha=0.3)
         plt.plot(x_grid, pdf_gen, color='#4C72B0', linewidth=2, label=f'Model Density (Step {step_label})')
 
@@ -97,7 +87,6 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        # Save the plot
         save_path = os.path.join(plot_dir, f"density_analysis_step_{step_label}.pdf")
         plt.savefig(save_path, format='pdf', bbox_inches='tight')
         plt.close()

@@ -3,7 +3,7 @@ import os
 import matplotlib.pyplot as plt
 
 from SOCK import Generator
-from data_loader import JumpDiffusionSimulator, FinancialTimeSeriesDataset
+from data_loader import FinancialTimeSeriesDataset
 from utils import plot_full_autoregressive_rollout, seed_everything
 from config import Config
 
@@ -13,19 +13,18 @@ def visualize_checkpoints():
     
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
-    sim = JumpDiffusionSimulator(d=cfg.model.d)
-    hist_path = sim.simulate(H=2048)
+    # Load pre-generated dataset
+    print(f"Loading dataset from {cfg.train.dataset_path}...")
+    data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
+    hist_path = data_dict["train_path"]
+    
     dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
 
     gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim).to(device)
-
     save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
-    
-    # --- NEW: Create a directory specifically for your PDF plots ---
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
-    print(f"Plots will be saved to: {plot_dir}")
-
+    
     checkpoints_to_plot = [10000, 50000, 100000]
 
     for step in checkpoints_to_plot:
@@ -35,32 +34,32 @@ def visualize_checkpoints():
             
         print(f"\n--- Loading intermediate checkpoint: Step {step} ---")
         checkpoint = torch.load(ckpt_path, map_location=device)
-        gen.load_state_dict(checkpoint['generator_state_dict'])
+        if 'generator_state_dict' in checkpoint:
+            gen.load_state_dict(checkpoint['generator_state_dict'])
+        else:
+            gen.load_state_dict(checkpoint)
         
-        # --- NEW: Define the save path and pass it to the plotting function ---
         pdf_path = os.path.join(plot_dir, f"rollout_step_{step}.pdf")
         plot_full_autoregressive_rollout(
             generator=gen,
             dataset=dataset,
             device=device,
             path_tensor=hist_path,
-            save_path=pdf_path # <--- Pass the PDF save path
+            save_path=pdf_path 
         )
 
-    # Final model
     final_path = os.path.join(save_dir, "generator_final.pt")
     if os.path.exists(final_path):
         print(f"\n--- Loading Final Model ---")
         gen.load_state_dict(torch.load(final_path, map_location=device))
         
-        # --- NEW: Save the final plot ---
         final_pdf_path = os.path.join(plot_dir, "rollout_final.pdf")
         plot_full_autoregressive_rollout(
             generator=gen,
             dataset=dataset,
             device=device,
             path_tensor=hist_path,
-            save_path=final_pdf_path # <--- Pass the PDF save path
+            save_path=final_pdf_path 
         )
 
 if __name__ == "__main__":

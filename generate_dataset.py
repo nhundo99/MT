@@ -12,8 +12,14 @@ def generate_and_save_dataset():
     H = 2048  # Length of the single training path
     J = 2048  # Number of independent out-of-sample continuations
     N = 2048  # Length of each out-of-sample continuation
+
+    rho = torch.tensor([
+        [1.0, 0.6, 0.3],
+        [0.6, 1.0, -0.5],
+        [0.3, -0.5, 1.0]
+    ])
     
-    sim = JumpDiffusionSimulator(d=cfg.model.d)
+    sim = JumpDiffusionSimulator(d=cfg.model.d, corr_matrix=rho)
     
     print(f"Generating training path (H={H})...")
     train_path = sim.simulate(H=H)  # Shape: (2048, d)

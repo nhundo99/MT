@@ -21,12 +21,21 @@ def train_sock_generator(
     optimizer = torch.optim.AdamW(generator.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
     
     warmup_steps = int(0.05 * cfg.train.total_steps)
+    decay_start = int(0.30 * cfg.train.total_steps) # Decay starts at the 30% mark to cover the last 70%
     
     def lr_lambda(current_step):
         if current_step < warmup_steps:
+            # 1. Linear warm up for first 5%
             return float(current_step) / float(max(1, warmup_steps))
-        return max(0.0, float(cfg.train.total_steps - current_step) / float(max(1, cfg.train.total_steps - warmup_steps)))
-        
+        elif current_step < decay_start:
+            # 2. Stay flat at max learning rate until the decay phase starts
+            return 1.0
+        else:
+            # 3. Linear decay to 0 over the last 70% of steps
+            decay_steps = cfg.train.total_steps - decay_start
+            steps_passed = current_step - decay_start
+            return max(0.0, float(decay_steps - steps_passed) / float(max(1, decay_steps)))
+            
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     generator.train()
@@ -72,10 +81,10 @@ def train_sock_generator(
         real_feats = sock_extractor(real_joined, scale=True)
         fake_feats = sock_extractor(fake_joined, scale=True)
         
-        # Mean Squared Error on Batch Means
+        # Mean Squared Error (Summed across the feature dimensions to match L2^2 norm)
         real_mean = real_feats.mean(dim=0)
         fake_mean = fake_feats.mean(dim=0)
-        loss = torch.nn.functional.mse_loss(fake_mean, real_mean)
+        loss = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='sum')
         
         loss.backward()
         optimizer.step()

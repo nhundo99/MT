@@ -5,7 +5,7 @@ import math
 class JumpDiffusionSimulator:
     """Simulates a multivariate correlated Merton-style Jump Diffusion process."""
     def __init__(self, d: int, mu: float = 0.05, sigma: float = 0.2, 
-                 jump_intensity: float = 5.0, jump_mean: float = 0.0, jump_std: float = 0.3,
+                 jump_intensity: float = 4.0, jump_mean: float = 0.0, jump_std: float = 0.1,
                  corr_matrix: torch.Tensor = None):
         self.d = d
         self.mu = mu
@@ -47,6 +47,45 @@ class JumpDiffusionSimulator:
         
         # Log returns
         returns = (self.mu - 0.5 * self.sigma**2) * dt + self.sigma * dW + J
+        
+        # Return stationary log-returns, NOT log-prices
+        return returns
+
+class GeometricBrownianMotionSimulator:
+    """Simulates a multivariate correlated Geometric Brownian Motion (GBM) process."""
+    def __init__(self, d: int, mu: float = 0.05, sigma: float = 0.2, 
+                 corr_matrix: torch.Tensor = None):
+        self.d = d
+        self.mu = mu
+        self.sigma = sigma
+        
+        # 1. Setup correlation matrix (defaults to independent/Identity matrix)
+        if corr_matrix is None:
+            self.corr_matrix = torch.eye(d)
+        else:
+            assert corr_matrix.shape == (d, d), f"Correlation matrix must be {d}x{d}"
+            # Ensure it's a valid correlation matrix (symmetric)
+            assert torch.allclose(corr_matrix, corr_matrix.T), "Correlation matrix must be symmetric"
+            self.corr_matrix = corr_matrix
+            
+        # 2. Cholesky decomposition: L @ L.T = corr_matrix
+        # We add a tiny jitter (1e-6) to the diagonal to ensure numerical stability during Cholesky
+        jitter = torch.eye(d) * 1e-6
+        self.L = torch.linalg.cholesky(self.corr_matrix + jitter)
+
+    def simulate(self, H: int, dt: float = 1/252) -> torch.Tensor:
+        # --- Correlated Brownian Motion ---
+        # Generate independent standard normal random variables
+        Z = torch.randn(H, self.d) 
+        
+        # Induce correlation: Multiply by the Cholesky lower triangular matrix
+        # Shape: (H, d) @ (d, d) -> (H, d)
+        Z_corr = Z @ self.L.T 
+        
+        dW = Z_corr * math.sqrt(dt)
+        
+        # Log returns (Standard Ito calculus drift + diffusion)
+        returns = (self.mu - 0.5 * self.sigma**2) * dt + self.sigma * dW
         
         # Return stationary log-returns, NOT log-prices
         return returns

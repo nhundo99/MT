@@ -27,6 +27,10 @@ print(f"Loading dataset from {cfg.train.dataset_path}...")
 data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
 hist_path = data_dict["train_path"]
 
+data_mean = hist_path.mean(dim=0, keepdim=True)
+data_std = hist_path.std(dim=0, keepdim=True) + 1e-6
+hist_path = (hist_path - data_mean) / data_std
+
 # 4. Create dataset & loader
 dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
 dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
@@ -51,7 +55,10 @@ loss_hist = train_sock_generator(
     dataloader=dataloader, 
     device=device, 
     cfg=cfg,             
-    writer=writer        
+    writer=writer,
+    # --- NEW: Pass scaling factors to the training loop so they can be saved ---
+    data_mean=data_mean,
+    data_std=data_std
 )
 
 writer.close()

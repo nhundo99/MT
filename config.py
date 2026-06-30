@@ -18,12 +18,12 @@ class TrainConfig:
     batch_size: int = 256
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
-    total_steps: int = 100000
+    total_steps: int = 30000
     resample_freq: int = 100
     log_freq: int = 10          
     save_freq: int = 10000      
     
-    experiment_name: str = "sock_experiment_1"
+    experiment_name: str = "sock_experiment_realistic_JD"
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
     
@@ -31,7 +31,7 @@ class TrainConfig:
     save_dir: str = ""
     
     # --- NEW: Add dataset path ---
-    dataset_path: str = "data/jump_diffusion_data.pt"
+    dataset_path: str = "data/realistic_jump_diffusion_data.pt"
 
 @dataclass
 class Config:

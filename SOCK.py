@@ -119,11 +119,17 @@ class SOCK(nn.Module):
             conv.weight.normal_()
             normalize_kernel_(conv.weight)
 
-    def fit_input_scales(self, x: torch.Tensor) -> None: 
-        # fits (input_mean, input_scl)
-        x_aug = self.augs(x)
-        self.input_mean = x_aug.mean(dim=(0, 1), keepdim=True)
-        self.input_scl = x_aug.std(dim=(0, 1), keepdim=True) + 1e-6
+    def fit_input_scales(self, dataloader: DataLoader, device: str) -> None: 
+        all_x_aug = []
+        with torch.no_grad(): # Saves memory
+            for x_minus, x_plus in dataloader:
+                x_joined = torch.cat([x_minus.to(device), x_plus.to(device)], dim=1)
+                x_aug = self.augs(x_joined)
+                all_x_aug.append(x_aug)
+                
+        all_x_aug = torch.cat(all_x_aug, dim=0)
+        self.input_mean = all_x_aug.mean(dim=(0, 1), keepdim=True)
+        self.input_scl = all_x_aug.std(dim=(0, 1), keepdim=True) + 1e-6
 
     def fit_ft_scales(self, dataloader: DataLoader, device: str) -> None: 
         # fits (ft_mean, ft_scl); call after every resample
@@ -193,9 +199,15 @@ class Generator(nn.Module):
         )
         self.proj_out = nn.Linear(hidden_dim, d)
 
+        self.reset_parameters()
+
     def reset_parameters(self) -> None:
-        # stabilizing initialization (e.g., small output/MLP scales)
-        pass
+        # Stabilizing initialization: ensures generated paths start with small variance
+        nn.init.orthogonal_(self.proj_out.weight, gain=0.01)
+        nn.init.zeros_(self.proj_out.bias)
+        
+        # Optional: scale down the initial state MLP
+        nn.init.orthogonal_(self.initial_state_generator[-1].weight, gain=0.1)
 
     def forward(self, c: torch.Tensor, n_steps: int = 64) -> torch.Tensor:
         # c.shape = (B, q, d)

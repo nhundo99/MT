@@ -10,7 +10,9 @@ def train_sock_generator(
     dataloader: torch.utils.data.DataLoader, 
     device: str, 
     cfg,            # <--- Receive config
-    writer          # <--- Receive TensorBoard writer
+    writer,          
+    data_mean: torch.Tensor, # <-- NEW
+    data_std: torch.Tensor   # <-- NEW
 ):
     # Use config for training parameters
     os.makedirs(cfg.train.save_dir, exist_ok=True)     
@@ -43,7 +45,7 @@ def train_sock_generator(
     # 1. Extract a single batch to fit the input scales for the augmented paths
     x_minus_sample, x_plus_sample = next(iter(dataloader))
     real_joined_sample = torch.cat([x_minus_sample, x_plus_sample], dim=1).to(device)
-    sock_extractor.fit_input_scales(real_joined_sample)
+    sock_extractor.fit_input_scales(dataloader, device)
     
     # 2. Fit feature scales as before
     sock_extractor.fit_ft_scales(dataloader, device)
@@ -108,6 +110,8 @@ def train_sock_generator(
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': loss.item(),
                 'config': asdict(cfg),
+                'data_mean': data_mean, # <-- SAVE MEAN
+                'data_std': data_std    # <-- SAVE STD
             }, save_path)
             
             print(f"Checkpoint saved to {save_path}")
@@ -115,7 +119,11 @@ def train_sock_generator(
             
     # Save a final model at the very end just to be safe
     final_save_path = os.path.join(cfg.train.save_dir, "generator_final.pt")
-    torch.save(generator.state_dict(), final_save_path)
+    torch.save({
+        'generator_state_dict': generator.state_dict(),
+        'data_mean': data_mean,
+        'data_std': data_std
+    }, final_save_path)
     print(f"Training complete. Final model saved to {final_save_path}")
             
     return loss_history

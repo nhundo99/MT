@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import os
 
 from SOCK import Generator
-from data_loader import FinancialTimeSeriesDataset
 from config import Config
 from utils import seed_everything
 
@@ -18,10 +17,6 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     train_path = data_dict["train_path"]
     test_paths = data_dict["test_paths"] # Shape: (J, N, d)
-    
-    dataset = FinancialTimeSeriesDataset(train_path, q=cfg.model.q_len, T=cfg.model.T_len)
-    mean = dataset.mean.squeeze().cpu().numpy()
-    std = dataset.std.squeeze().cpu().numpy()
     
     print("Calculating Ground Truth Quantiles from Continuations...")
     # Because we're predicting horizon T, we extract the first T steps of each out-of-sample path
@@ -43,10 +38,6 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
     
     num_samples = test_paths.size(0) # J = 2048
     
-    # Condition generation on the very end of the training data
-    context = dataset.scaled_path[-cfg.model.q_len:].unsqueeze(0).to(device)
-    batched_context = context.repeat(num_samples, 1, 1)
-
     checkpoints = [(step, f"generator_step_{step}.pt") for step in checkpoints_to_plot]
     checkpoints.append(("Final", "generator_final.pt"))
 
@@ -57,6 +48,26 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
             
         print(f"Analyzing drift for checkpoint {step_label}...")
         checkpoint = torch.load(ckpt_path, map_location=device)
+        
+        # --- NEW: Extract scaling parameters directly from checkpoint ---
+        # Fallback to defaults just in case you run this on an older checkpoint without them
+        if 'data_mean' in checkpoint and 'data_std' in checkpoint:
+            data_mean_tensor = checkpoint['data_mean'].to(device)
+            data_std_tensor = checkpoint['data_std'].to(device)
+        else:
+            print("Warning: data_mean and data_std not found in checkpoint. Falling back to dynamic calculation.")
+            data_mean_tensor = train_path.mean(dim=0, keepdim=True).to(device)
+            data_std_tensor = train_path.std(dim=0, keepdim=True).to(device) + 1e-6
+
+        data_mean_np = data_mean_tensor.cpu().numpy()
+        data_std_np = data_std_tensor.cpu().numpy()
+        
+        # --- NEW: Condition generation on the correctly SCALED end of the training data ---
+        raw_context = train_path[-cfg.model.q_len:].unsqueeze(0).to(device)
+        scaled_context = (raw_context - data_mean_tensor) / data_std_tensor
+        batched_context = scaled_context.repeat(num_samples, 1, 1)
+
+        # Load Generator Weights
         if 'generator_state_dict' in checkpoint:
             gen.load_state_dict(checkpoint['generator_state_dict'])
         else:
@@ -68,7 +79,8 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         with torch.no_grad():
             generated_scaled = gen(batched_context, n_steps=cfg.model.T_len)
             
-        generated_returns = generated_scaled.cpu().numpy() * std + mean
+        # --- NEW: Unscale the generated paths BEFORE computing cumsums and quantiles ---
+        generated_returns = generated_scaled.cpu().numpy() * data_std_np + data_mean_np
         cum_log_returns = np.cumsum(generated_returns, axis=1) 
         
         mod_q05 = np.percentile(cum_log_returns, 5, axis=0)

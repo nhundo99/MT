@@ -30,7 +30,7 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     real_returns_flat = test_paths[:, :, 0].numpy().flatten()
 
     kde_real = gaussian_kde(real_returns_flat)
-    x_grid = np.linspace(np.min(real_returns_flat), np.max(real_returns_flat), 1000)
+    x_grid = np.linspace(np.min(real_returns_flat)/4, np.max(real_returns_flat)/4, 1000)
     pdf_real = kde_real(x_grid)
 
     # 2. Setup Generator

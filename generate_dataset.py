@@ -1,6 +1,6 @@
 import torch
 import os
-from data_loader import JumpDiffusionSimulator
+from data_loader import JumpDiffusionSimulator, GeometricBrownianMotionSimulator
 from config import Config
 from utils import seed_everything
 
@@ -30,7 +30,7 @@ def generate_and_save_dataset():
     test_paths = sim.simulate(H=J * N).view(J, N, cfg.model.d) 
     
     os.makedirs("data", exist_ok=True)
-    save_path = "data/jump_diffusion_data.pt"
+    save_path = cfg.train.dataset_path
     
     torch.save({
         "train_path": train_path,

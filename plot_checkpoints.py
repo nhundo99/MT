@@ -51,7 +51,14 @@ def visualize_checkpoints():
     final_path = os.path.join(save_dir, "generator_final.pt")
     if os.path.exists(final_path):
         print(f"\n--- Loading Final Model ---")
-        gen.load_state_dict(torch.load(final_path, map_location=device))
+        checkpoint = torch.load(final_path, map_location=device)
+        
+        # --- FIXED: Extract the state_dict from the dictionary safely ---
+        if 'generator_state_dict' in checkpoint:
+            gen.load_state_dict(checkpoint['generator_state_dict'])
+        else:
+            gen.load_state_dict(checkpoint)
+        # ----------------------------------------------------------------
         
         final_pdf_path = os.path.join(plot_dir, "rollout_final.pdf")
         plot_full_autoregressive_rollout(

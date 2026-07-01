@@ -68,6 +68,11 @@ class Config:
     seed: int = 42
     dataset_name: str = "GBM_v1" 
     
+    # --- NEW: Evaluation Override ---
+    # Leave empty ("") when training a new model.
+    # Paste the exact folder name here when running analysis scripts!
+    eval_run_name: str = "20260701_1016_GBM_v1_baseline" 
+    
     data: BaseDataConfig = field(default_factory=GBMDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -76,10 +81,15 @@ class Config:
         # 1. Build the dataset path
         self.train.dataset_path = f"data/{self.dataset_name}.pt"
         
-        # 2. Build the super-descriptive experiment name
-        timestamp = time.strftime("%Y%m%d_%H%M")
-        self.train.experiment_name = f"{timestamp}_{self.dataset_name}_{self.train.experiment_name}"
+        # 2. The Override Logic
+        if self.eval_run_name != "":
+            # If you provided a name, use it EXACTLY as-is (no new timestamp)
+            self.train.experiment_name = self.eval_run_name
+        else:
+            # Otherwise, generate a fresh timestamp for a new training run
+            timestamp = time.strftime("%Y%m%d_%H%M")
+            self.train.experiment_name = f"{timestamp}_{self.dataset_name}_{self.train.experiment_name}"
         
-        # 3. Automatically build the final save directories!
+        # 3. Automatically build the final save directories
         self.train.tb_dir = os.path.join(self.train.tb_base_dir, self.train.experiment_name)
         self.train.save_dir = os.path.join(self.train.model_base_dir, self.train.experiment_name)

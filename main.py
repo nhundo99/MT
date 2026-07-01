@@ -7,7 +7,7 @@ from SOCK import *
 from data_loader import *
 from training import *
 from utils import *
-from config import Config
+from config import Config, GBMDataConfig, JDDataConfig
 
 # 1. Instantiate the config
 cfg = Config()
@@ -16,9 +16,6 @@ seed_everything(cfg.seed)
 device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 print(f"Using device: {device}")
 
-cfg.train.tb_dir = os.path.join(cfg.train.tb_base_dir, cfg.train.experiment_name)
-cfg.train.save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
-
 # 2. Setup TensorBoard Writer
 writer = SummaryWriter(log_dir=cfg.train.tb_dir)
 
@@ -26,6 +23,17 @@ writer = SummaryWriter(log_dir=cfg.train.tb_dir)
 print(f"Loading dataset from {cfg.train.dataset_path}...")
 data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
 hist_path = data_dict["train_path"]
+
+if "dataset_config" in data_dict:
+    loaded_data_cfg = data_dict["dataset_config"]
+    
+    # Check the string we saved to know which class to rebuild!
+    if loaded_data_cfg.get("simulator") == "GBM":
+        cfg.data = GBMDataConfig(**loaded_data_cfg)
+    else:
+        cfg.data = JDDataConfig(**loaded_data_cfg)
+        
+    print(f"Loaded {cfg.data.simulator} dataset parameters for: {cfg.dataset_name}")
 
 data_mean = hist_path.mean(dim=0, keepdim=True)
 data_std = hist_path.std(dim=0, keepdim=True) + 1e-6

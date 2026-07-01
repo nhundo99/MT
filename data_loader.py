@@ -4,7 +4,7 @@ import math
 
 class JumpDiffusionSimulator:
     """Simulates a multivariate correlated Merton-style Jump Diffusion process."""
-    def __init__(self, d: int, mu: float = 0.05, sigma: float = 0.2, 
+    def __init__(self, d: int, mu: float = 0.00, sigma: float = 0.0, 
                  jump_intensity: float = 4.0, jump_mean: float = 0.0, jump_std: float = 0.1,
                  corr_matrix: torch.Tensor = None):
         self.d = d

@@ -1,43 +1,53 @@
-import torch
-import os
+# generate_dataset.py
 from data_loader import JumpDiffusionSimulator, GeometricBrownianMotionSimulator
 from config import Config
+from dataclasses import asdict
+import torch
 from utils import seed_everything
+import os
 
 def generate_and_save_dataset():
     cfg = Config()
     seed_everything(cfg.seed)
     
-    # Paper specifications for synthetic data
-    H = 2048  # Length of the single training path
-    J = 2048  # Number of independent out-of-sample continuations
-    N = 2048  # Length of each out-of-sample continuation
-
-    rho = torch.tensor([
-        [1.0, 0.6, 0.3],
-        [0.6, 1.0, -0.5],
-        [0.3, -0.5, 1.0]
-    ])
+    # --- NEW: Convert config list to a tensor ---
+    rho = torch.tensor(cfg.data.corr_matrix)
     
-    sim = JumpDiffusionSimulator(d=cfg.model.d, corr_matrix=rho)
+    # --- AUTOMATIC ROUTING BASED ON CONFIG ---
+    if cfg.data.simulator == "JumpDiffusion":
+        print("Initializing Jump Diffusion Simulator...")
+        sim = JumpDiffusionSimulator(
+            d=cfg.model.d, 
+            mu=cfg.data.mu, sigma=cfg.data.sigma,
+            jump_intensity=cfg.data.jump_intensity,
+            jump_mean=cfg.data.jump_mean, jump_std=cfg.data.jump_std,
+            corr_matrix=rho
+        )
+    elif cfg.data.simulator == "GBM":
+        print("Initializing Geometric Brownian Motion Simulator...")
+        sim = GeometricBrownianMotionSimulator(
+            d=cfg.model.d, 
+            mu=cfg.data.mu, sigma=cfg.data.sigma,
+            corr_matrix=rho
+        )
+    else:
+        raise ValueError(f"Unknown simulator type: {cfg.data.simulator}")
     
-    print(f"Generating training path (H={H})...")
-    train_path = sim.simulate(H=H)  # Shape: (2048, d)
+    print(f"Generating training path (H={cfg.data.H})...")
+    train_path = sim.simulate(H=cfg.data.H) 
     
-    print(f"Generating {J} out-of-sample continuation paths (N={N})...")
-    # Because jump diffusion returns are stationary, we can simulate all steps 
-    # and reshape to get J independent paths of length N
-    test_paths = sim.simulate(H=J * N).view(J, N, cfg.model.d) 
+    print(f"Generating {cfg.data.J} out-of-sample continuation paths (N={cfg.data.N})...")
+    test_paths = sim.simulate(H=cfg.data.J * cfg.data.N).view(cfg.data.J, cfg.data.N, cfg.model.d) 
     
     os.makedirs("data", exist_ok=True)
-    save_path = cfg.train.dataset_path
     
     torch.save({
         "train_path": train_path,
-        "test_paths": test_paths
-    }, save_path)
+        "test_paths": test_paths,
+        "dataset_config": asdict(cfg.data) 
+    }, cfg.train.dataset_path)
     
-    print(f"Dataset successfully saved to {save_path}")
+    print(f"Dataset successfully saved to {cfg.train.dataset_path}")
 
 if __name__ == "__main__":
     generate_and_save_dataset()

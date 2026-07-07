@@ -48,7 +48,7 @@ class TrainConfig:
     batch_size: int = 256
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
-    total_steps: int = 10000
+    total_steps: int = 100000
     resample_freq: int = 100
     log_freq: int = 10          
     save_freq: int = 10000      
@@ -66,14 +66,14 @@ class TrainConfig:
 @dataclass
 class Config:
     seed: int = 42
-    dataset_name: str = "GBM_v1" 
+    dataset_name: str = "JD_v1" 
     
     # --- NEW: Evaluation Override ---
     # Leave empty ("") when training a new model.
     # Paste the exact folder name here when running analysis scripts!
-    eval_run_name: str = "20260701_1016_GBM_v1_baseline" 
+    eval_run_name: str = "20260701_1414_JD_v1_baseline" 
     
-    data: BaseDataConfig = field(default_factory=GBMDataConfig) 
+    data: BaseDataConfig = field(default_factory=JDDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 

@@ -17,18 +17,6 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     train_path = data_dict["train_path"]
     test_paths = data_dict["test_paths"] # Shape: (J, N, d)
-    
-    print("Calculating Ground Truth Quantiles from Continuations...")
-    # Because we're predicting horizon T, we extract the first T steps of each out-of-sample path
-    real_returns = test_paths[:, :cfg.model.T_len, :].numpy() # (2048, T, d)
-    real_cum_returns = np.cumsum(real_returns, axis=1) # Cumulative sum = log prices
-    
-    # Ground Truth Quantiles
-    real_q05 = np.percentile(real_cum_returns, 5, axis=0)
-    real_q15 = np.percentile(real_cum_returns, 15, axis=0)
-    real_q50 = np.percentile(real_cum_returns, 50, axis=0)
-    real_q85 = np.percentile(real_cum_returns, 85, axis=0)
-    real_q95 = np.percentile(real_cum_returns, 95, axis=0)
 
     # 2. Setup Generator
     gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim).to(device)
@@ -49,8 +37,7 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         print(f"Analyzing drift for checkpoint {step_label}...")
         checkpoint = torch.load(ckpt_path, map_location=device)
         
-        # --- NEW: Extract scaling parameters directly from checkpoint ---
-        # Fallback to defaults just in case you run this on an older checkpoint without them
+        # --- Extract scaling parameters directly from checkpoint ---
         if 'data_mean' in checkpoint and 'data_std' in checkpoint:
             data_mean_tensor = checkpoint['data_mean'].to(device)
             data_std_tensor = checkpoint['data_std'].to(device)
@@ -62,10 +49,10 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         data_mean_np = data_mean_tensor.cpu().numpy()
         data_std_np = data_std_tensor.cpu().numpy()
         
-        # --- NEW: Condition generation on the correctly SCALED end of the training data ---
-        raw_context = train_path[-cfg.model.q_len:].unsqueeze(0).to(device)
-        scaled_context = (raw_context - data_mean_tensor) / data_std_tensor
-        batched_context = scaled_context.repeat(num_samples, 1, 1)
+        # --- FIXED EVALUATION: Extract 2048 distinct contexts from the out-of-sample test paths ---
+        # We use the first q_len steps of the J independent continuations as our contexts
+        raw_contexts = test_paths[:, :cfg.model.q_len, :].to(device) # Shape: (2048, q, d)
+        scaled_contexts = (raw_contexts - data_mean_tensor) / data_std_tensor
 
         # Load Generator Weights
         if 'generator_state_dict' in checkpoint:
@@ -75,14 +62,27 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
             
         gen.eval()
         
-        # 3. Generate multiple futures
+        # 3. Generate ONE future per distinct context
         with torch.no_grad():
-            generated_scaled = gen(batched_context, n_steps=cfg.model.T_len)
+            generated_scaled = gen(scaled_contexts, n_steps=cfg.model.T_len)
             
-        # --- NEW: Unscale the generated paths BEFORE computing cumsums and quantiles ---
+        # Unscale the generated paths
         generated_returns = generated_scaled.cpu().numpy() * data_std_np + data_mean_np
         cum_log_returns = np.cumsum(generated_returns, axis=1) 
         
+        # --- FIXED GROUND TRUTH: Shift the real returns to the window AFTER the context ---
+        # We evaluate against the actual continuations immediately following our extracted contexts
+        real_returns = test_paths[:, cfg.model.q_len:cfg.model.q_len + cfg.model.T_len, :].numpy()
+        real_cum_returns = np.cumsum(real_returns, axis=1)
+        
+        # Ground Truth Quantiles
+        real_q05 = np.percentile(real_cum_returns, 5, axis=0)
+        real_q15 = np.percentile(real_cum_returns, 15, axis=0)
+        real_q50 = np.percentile(real_cum_returns, 50, axis=0)
+        real_q85 = np.percentile(real_cum_returns, 85, axis=0)
+        real_q95 = np.percentile(real_cum_returns, 95, axis=0)
+        
+        # Generated Quantiles
         mod_q05 = np.percentile(cum_log_returns, 5, axis=0)
         mod_q15 = np.percentile(cum_log_returns, 15, axis=0)
         mod_q50 = np.percentile(cum_log_returns, 50, axis=0)

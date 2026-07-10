@@ -9,8 +9,8 @@ class BaseDataConfig:
     H: int = 2048
     J: int = 2048
     N: int = 2048
-    mu: float = 0.05
-    sigma: float = 0.2
+    mu: float = 0.00
+    sigma: float = 0.0
     corr_matrix: list = field(default_factory=lambda: [
         [1.0, 0.6, 0.3],
         [0.6, 1.0, -0.5],
@@ -29,7 +29,7 @@ class JDDataConfig(BaseDataConfig):
     simulator: str = "JumpDiffusion"
     jump_intensity: float = 4.0
     jump_mean: float = 0.0
-    jump_std: float = 0.1
+    jump_std: float = 0.15
 
 @dataclass
 class ModelConfig:
@@ -66,12 +66,12 @@ class TrainConfig:
 @dataclass
 class Config:
     seed: int = 42
-    dataset_name: str = "JD_v1" 
+    dataset_name: str = "Jump_Only_Sweep_15" 
     
     # --- NEW: Evaluation Override ---
     # Leave empty ("") when training a new model.
     # Paste the exact folder name here when running analysis scripts!
-    eval_run_name: str = "20260701_1414_JD_v1_baseline" 
+    eval_run_name: str = "" 
     
     data: BaseDataConfig = field(default_factory=JDDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)

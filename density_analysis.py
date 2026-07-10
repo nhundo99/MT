@@ -2,7 +2,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from scipy.stats import gaussian_kde
+import csv
+from scipy.stats import gaussian_kde, wasserstein_distance, ks_2samp, cramervonmises_2samp
 
 from SOCK import Generator
 from data_loader import FinancialTimeSeriesDataset
@@ -33,28 +34,33 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     x_grid = np.linspace(np.min(real_returns_flat)/4, np.max(real_returns_flat)/4, 1000)
     pdf_real = kde_real(x_grid)
 
-    # 2. Setup Generator
+    # 2. Setup Generator and Directories
     gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim).to(device)
+    
     save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
     plot_dir = os.path.join(save_dir, "plots")
+    stats_dir = os.path.join(save_dir, "statistics") # NEW: Statistics directory
+    
     os.makedirs(plot_dir, exist_ok=True)
+    os.makedirs(stats_dir, exist_ok=True) # Ensure stats directory exists
     
     num_samples = test_paths.size(0) # Exactly J=2048 to match the real continuations
     
-    # To evaluate out-of-sample conditional generation correctly, we condition on the very end 
-    # of the training path (the exact boundary before out-of-sample data begins).
     context = dataset.scaled_path[-cfg.model.q_len:].unsqueeze(0).to(device)
     batched_context = context.repeat(num_samples, 1, 1)
 
     checkpoints = [(step, f"generator_step_{step}.pt") for step in checkpoints_to_plot]
     checkpoints.append(("Final", "generator_final.pt"))
 
+    # NEW: List to accumulate statistical results for the CSV
+    all_statistics = []
+
     for step_label, ckpt_name in checkpoints:
         ckpt_path = os.path.join(save_dir, ckpt_name)
         if not os.path.exists(ckpt_path):
             continue
             
-        print(f"Plotting probability density for checkpoint {step_label}...")
+        print(f"Analyzing probability density for checkpoint {step_label}...")
         
         checkpoint = torch.load(ckpt_path, map_location=device)
         if 'generator_state_dict' in checkpoint:
@@ -70,10 +76,26 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         generated_returns = generated_scaled.cpu().numpy() * std + mean
         generated_returns_flat = generated_returns[:, :, 0].flatten()
         
+        # --- NEW: Statistical Quantification ---
+        w_dist = wasserstein_distance(real_returns_flat, generated_returns_flat)
+        cvm_res = cramervonmises_2samp(real_returns_flat, generated_returns_flat)
+        ks_stat, _ = ks_2samp(real_returns_flat, generated_returns_flat)
+        
+        # Save results to our list
+        all_statistics.append({
+            "Checkpoint": step_label,
+            "Wasserstein_Distance": w_dist,
+            "CvM_Statistic": cvm_res.statistic,
+            "KS_Statistic": ks_stat
+        })
+        
+        # Print to console for immediate feedback
+        print(f"  -> Wasserstein: {w_dist:.6f} | CvM: {cvm_res.statistic:.6f} | KS: {ks_stat:.6f}")
+
+        # 4. Plotting
         kde_gen = gaussian_kde(generated_returns_flat)
         pdf_gen = kde_gen(x_grid) 
 
-        # 4. Plotting
         plt.figure(figsize=(8, 5))
         plt.fill_between(x_grid, pdf_real, color='gray', alpha=0.3)
         plt.plot(x_grid, pdf_real, color='black', linestyle='--', linewidth=2, label='Real Data Density')
@@ -90,7 +112,19 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         save_path = os.path.join(plot_dir, f"density_analysis_step_{step_label}.pdf")
         plt.savefig(save_path, format='pdf', bbox_inches='tight')
         plt.close()
-        print(f"Saved density plot to {save_path}")
+        
+    # --- NEW: Save all collected statistics to a CSV file ---
+    if all_statistics:
+        csv_path = os.path.join(stats_dir, "marginal_density_metrics.csv")
+        # Define the headers based on the dictionary keys
+        headers = ["Checkpoint", "Wasserstein_Distance", "CvM_Statistic", "KS_Statistic"]
+        
+        with open(csv_path, mode='w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(all_statistics)
+            
+        print(f"\nSuccessfully saved statistical metrics to: {csv_path}")
 
 if __name__ == "__main__":
     plot_probability_densities()

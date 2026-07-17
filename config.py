@@ -48,12 +48,17 @@ class TrainConfig:
     batch_size: int = 256
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
-    total_steps: int = 100000
+    total_steps: int = 50000
     resample_freq: int = 100
     log_freq: int = 10          
     save_freq: int = 10000      
     
-    experiment_name: str = "baseline" 
+    # --- NEW: Drift Regularization ---
+    regularize_drift: bool = True
+    lambda_reg: float = 10000.0
+    target_drift: float = 0.0
+    
+    experiment_name: str = "regularized" 
     
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
@@ -66,12 +71,12 @@ class TrainConfig:
 @dataclass
 class Config:
     seed: int = 42
-    dataset_name: str = "Jump_Only_Sweep_15" 
+    dataset_name: str = "GBM_Mu_0p15" 
     
     # --- NEW: Evaluation Override ---
     # Leave empty ("") when training a new model.
     # Paste the exact folder name here when running analysis scripts!
-    eval_run_name: str = "" 
+    eval_run_name: str = "20260714_1329_GBM_Mu_0p15_regularized" 
     
     data: BaseDataConfig = field(default_factory=JDDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -79,7 +84,7 @@ class Config:
 
     def __post_init__(self):
         # 1. Build the dataset path
-        self.train.dataset_path = f"data/{self.dataset_name}.pt"
+        self.train.dataset_path = f"data/drift_sweep/{self.dataset_name}.pt"
         
         # 2. The Override Logic
         if self.eval_run_name != "":

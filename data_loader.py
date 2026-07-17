@@ -43,7 +43,7 @@ class JumpDiffusionSimulator:
         # Jumps are typically modeled as independent idiosyncratic shocks 
         # (unless you specifically want co-jumps/market-wide shocks)
         n_jumps = torch.poisson(torch.ones(H, self.d) * self.jump_intensity * dt)
-        J = n_jumps * torch.randn(H, self.d) * self.jump_std + n_jumps * self.jump_mean
+        J = torch.sqrt(n_jumps) * torch.randn(H, self.d) * self.jump_std + n_jumps * self.jump_mean
         
         # Log returns
         returns = (self.mu - 0.5 * self.sigma**2) * dt + self.sigma * dW + J

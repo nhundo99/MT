@@ -35,10 +35,6 @@ if "dataset_config" in data_dict:
         
     print(f"Loaded {cfg.data.simulator} dataset parameters for: {cfg.dataset_name}")
 
-data_mean = hist_path.mean(dim=0, keepdim=True)
-data_std = hist_path.std(dim=0, keepdim=True) + 1e-6
-hist_path = (hist_path - data_mean) / data_std
-
 # 4. Create dataset & loader
 dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
 dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
@@ -65,8 +61,8 @@ loss_hist = train_sock_generator(
     cfg=cfg,             
     writer=writer,
     # --- NEW: Pass scaling factors to the training loop so they can be saved ---
-    data_mean=data_mean,
-    data_std=data_std
+    data_mean=dataset.mean,
+    data_std=dataset.std
 )
 
 writer.close()

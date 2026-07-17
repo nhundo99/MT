@@ -74,13 +74,8 @@ def run_drift_experiment():
             data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
             hist_path = data_dict["train_path"]
             
-            # Scale Data
-            data_mean = hist_path.mean(dim=0, keepdim=True)
-            data_std = hist_path.std(dim=0, keepdim=True) + 1e-6
-            scaled_hist_path = (hist_path - data_mean) / data_std
-            
             # Setup DataLoader
-            dataset = FinancialTimeSeriesDataset(scaled_hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
+            dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
             dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
             
             # Initialize Models
@@ -88,7 +83,7 @@ def run_drift_experiment():
             gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
             
             writer = SummaryWriter(log_dir=cfg.train.tb_dir)
-            train_sock_generator(gen, sock, dataloader, device, cfg, writer, data_mean, data_std)
+            train_sock_generator(gen, sock, dataloader, device, cfg, writer, dataset.mean, dataset.std)
             writer.close()
         else:
             print(f"[*] Trained model already exists at {final_model_path}. Skipping training.")

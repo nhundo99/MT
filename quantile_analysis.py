@@ -75,27 +75,33 @@ def analyze_cumulative_drift(checkpoints_to_plot=[10000, 50000, 100000]):
         real_returns = test_paths[:, cfg.model.q_len:cfg.model.q_len + cfg.model.T_len, :].numpy()
         real_cum_returns = np.cumsum(real_returns, axis=1)
         
-        # Ground Truth Quantiles
+        # Ground Truth Quantiles (Keep these for plotting!)
         real_q05 = np.percentile(real_cum_returns, 5, axis=0)
         real_q15 = np.percentile(real_cum_returns, 15, axis=0)
         real_q50 = np.percentile(real_cum_returns, 50, axis=0)
         real_q85 = np.percentile(real_cum_returns, 85, axis=0)
         real_q95 = np.percentile(real_cum_returns, 95, axis=0)
         
-        # Generated Quantiles
+        # Generated Quantiles (Keep these for plotting!)
         mod_q05 = np.percentile(cum_log_returns, 5, axis=0)
         mod_q15 = np.percentile(cum_log_returns, 15, axis=0)
         mod_q50 = np.percentile(cum_log_returns, 50, axis=0)
         mod_q85 = np.percentile(cum_log_returns, 85, axis=0)
         mod_q95 = np.percentile(cum_log_returns, 95, axis=0)
 
-        real_annualized_drift = (real_q50[-1, 0] / cfg.model.T_len) * 252
-        model_annualized_drift = (mod_q50[-1, 0] / cfg.model.T_len) * 252
+        # --- THE FIX: Calculate the expected drift using the MEAN, not the median ---
+        # We take the mean across all 2048 paths at the final time step (-1) for Asset 0
+        real_mean_final = np.mean(real_cum_returns[:, -1, 0])
+        model_mean_final = np.mean(cum_log_returns[:, -1, 0])
+
+        # Annualize using the mean 
+        real_annualized_drift = (real_mean_final / cfg.model.T_len) * 252
+        model_annualized_drift = (model_mean_final / cfg.model.T_len) * 252
         drift_bias = model_annualized_drift - real_annualized_drift
         
         print(f"--- Drift Bias Analysis (Checkpoint {step_label}) ---")
-        print(f"Real Annualized Drift:  {real_annualized_drift:.4f}")
-        print(f"Model Annualized Drift: {model_annualized_drift:.4f}")
+        print(f"Real Annualized Drift (Mean):  {real_annualized_drift:.4f}")
+        print(f"Model Annualized Drift (Mean): {model_annualized_drift:.4f}")
         print(f"Drift Bias (Model - Real): {drift_bias:.4f}")
         
         # 4. Plotting for Asset 1

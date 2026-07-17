@@ -47,7 +47,7 @@ def train_sock_generator(
     real_joined_sample = torch.cat([x_minus_sample, x_plus_sample], dim=1).to(device)
     sock_extractor.fit_input_scales(dataloader, device)
     
-    # 2. Fit feature scales as before
+    # 2. Fit feature scales
     sock_extractor.fit_ft_scales(dataloader, device)
     
     loss_history = []
@@ -86,7 +86,22 @@ def train_sock_generator(
         # Mean Squared Error (Summed across the feature dimensions to match L2^2 norm)
         real_mean = real_feats.mean(dim=0)
         fake_mean = fake_feats.mean(dim=0)
-        loss = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='sum')
+        loss_sock = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='sum')
+        
+        # --- NEW: Drift Regularization ---
+        if cfg.train.regularize_drift:
+            # Calculate the empirical drift of the generated future path
+            generated_drift = x_hat_plus.mean(dim=1)
+            target_drift_tensor = torch.full_like(generated_drift, cfg.train.target_drift)
+            
+            # Compute MSE between generated drift and the target
+            loss_drift = torch.nn.functional.mse_loss(generated_drift, target_drift_tensor, reduction='mean')
+            
+            # Total objective function
+            loss = loss_sock + (cfg.train.lambda_reg * loss_drift)
+        else:
+            loss = loss_sock
+        # ---------------------------------
         
         loss.backward()
         optimizer.step()
@@ -96,10 +111,13 @@ def train_sock_generator(
         step_count += 1
 
         if step_count % cfg.train.log_freq == 0:
-            writer.add_scalar("Loss/train", loss.item(), step_count)
+            writer.add_scalar("Loss/train_total", loss.item(), step_count)
+            writer.add_scalar("Loss/train_sock", loss_sock.item(), step_count)
+            if cfg.train.regularize_drift:
+                writer.add_scalar("Loss/train_drift_penalty", loss_drift.item(), step_count)
             writer.add_scalar("LearningRate/train", scheduler.get_last_lr()[0], step_count)
         
-        # --- NEW: Model Checkpointing Logic ---
+        # --- Model Checkpointing Logic ---
         if step_count % cfg.train.save_freq == 0:
             save_path = os.path.join(cfg.train.save_dir, f"generator_step_{step_count}.pt")
             

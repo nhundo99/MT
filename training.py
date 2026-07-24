@@ -86,21 +86,71 @@ def train_sock_generator(
         # Mean Squared Error (Summed across the feature dimensions to match L2^2 norm)
         real_mean = real_feats.mean(dim=0)
         fake_mean = fake_feats.mean(dim=0)
-        loss_sock = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='sum')
+        loss_sock = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='mean')
         
-        # --- NEW: Drift Regularization ---
+        # Accumulate total loss dynamically
+        loss = loss_sock
+        
+        # --- Corrected Drift Regularization ---
         if cfg.train.regularize_drift:
-            # Calculate the empirical drift of the generated future path
-            generated_drift = x_hat_plus.mean(dim=1)
-            target_drift_tensor = torch.full_like(generated_drift, cfg.train.target_drift)
+            if cfg.train.drift_control_type == "conditional":
+                # 1. Path-by-path matching (The original approach)
+                # Calculates mean per path (dim=1 corresponds to the T=64 time steps)
+                generated_drift = x_hat_plus.mean(dim=1)
+                real_drift = x_plus.mean(dim=1)
+                
+                # Penalizes the network if individual paths don't match specific noise
+                loss_drift = torch.nn.functional.mse_loss(generated_drift, real_drift, reduction='mean')
+                
+            elif cfg.train.drift_control_type == "global":
+                # 2. Macroscopic matching 
+                # Calculate the expected value across the batch and time steps, 
+                # BUT keep the asset dimensions separate!
+                expected_model_drift = x_hat_plus.mean(dim=(0, 1)) 
+                
+                # Target is dynamically pulled from the config (e.g., 0.0)
+                # PyTorch will automatically broadcast this scalar to match the 'd' asset channels
+                target = torch.tensor(cfg.train.target_drift, device=device)
+                
+                # Penalizes the network if ANY INDIVIDUAL ASSET'S global expectation drifts
+                loss_drift = torch.nn.functional.mse_loss(expected_model_drift, target.expand_as(expected_model_drift))
             
-            # Compute MSE between generated drift and the target
-            loss_drift = torch.nn.functional.mse_loss(generated_drift, target_drift_tensor, reduction='mean')
+            elif cfg.train.drift_control_type == "monte_carlo":
+                # 1. Tile the current contexts to reach the massive MC sample size (e.g., 10,000)
+                num_repeats = max(1, cfg.train.mc_samples // x_minus.size(0))
+                mc_contexts = x_minus.repeat(num_repeats, 1, 1)
+
+                # 2. Generate the Monte Carlo future paths
+                mc_fake_scaled = generator(mc_contexts, n_steps=x_plus.size(1))
+
+                # 3. Un-scale the outputs back to real-world returns
+                mc_fake_returns = mc_fake_scaled * data_std.to(device) + data_mean.to(device)
+
+                # 4. Calculate the annualized drift from the generated paths
+                mc_annualized_drift = mc_fake_returns.mean(dim=(0, 1)) * 252.0
+
+                # 5. Extract the true ground-truth parameters from the loaded dataset
+                # (These are guaranteed to be correct because main.py overwrote cfg.data)
+                true_mu = cfg.data.mu
+                true_sigma = cfg.data.sigma
+                
+                # 6. Apply Ito's correction to the target drift
+                adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
+                
+                # 7. Calculate loss against the adjusted target
+                target_tensor = torch.tensor(adjusted_target, device=device).expand_as(mc_annualized_drift)
+                loss_drift = torch.nn.functional.mse_loss(mc_annualized_drift, target_tensor)
+                
+            else:
+                raise ValueError(f"Unknown drift control type: {cfg.train.drift_control_type}")
+
+            # Apply the weighted penalty to the total loss
+            loss = loss + (cfg.train.lambda_reg * loss_drift)
             
-            # Total objective function
-            loss = loss_sock + (cfg.train.lambda_reg * loss_drift)
-        else:
-            loss = loss_sock
+        # --- NEW: Sparsity Regularization ---
+        if cfg.train.regularize_sparsity:
+            loss_sparsity = torch.mean(torch.abs(x_hat_plus))
+            loss = loss + (cfg.train.lambda_sparse * loss_sparsity)
         # ---------------------------------
         
         loss.backward()
@@ -113,8 +163,14 @@ def train_sock_generator(
         if step_count % cfg.train.log_freq == 0:
             writer.add_scalar("Loss/train_total", loss.item(), step_count)
             writer.add_scalar("Loss/train_sock", loss_sock.item(), step_count)
+            
             if cfg.train.regularize_drift:
                 writer.add_scalar("Loss/train_drift_penalty", loss_drift.item(), step_count)
+                
+            # Log sparsity tracking if enabled
+            if cfg.train.regularize_sparsity:
+                writer.add_scalar("Loss/train_sparsity_penalty", loss_sparsity.item(), step_count)
+                
             writer.add_scalar("LearningRate/train", scheduler.get_last_lr()[0], step_count)
         
         # --- Model Checkpointing Logic ---

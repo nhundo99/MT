@@ -11,7 +11,7 @@ from utils import seed_everything
 
 
 # -------------------------------------------------------------------------
-# 1. Metric Helper Functions (Section C.2.3 of SOCK Paper)
+# 1. Metric Helper Functions
 # -------------------------------------------------------------------------
 
 def compute_cvm_distance(real_returns: np.ndarray, gen_returns: np.ndarray) -> float:
@@ -23,9 +23,7 @@ def compute_cvm_distance(real_returns: np.ndarray, gen_returns: np.ndarray) -> f
     d = real_returns.shape[-1]
     real_flat = real_returns.reshape(-1, d)
     gen_flat = gen_returns.reshape(-1, d)
-    
-    # SciPy scales its statistic by (N*M)/(N+M) for hypothesis testing.
-    # We must remove this to get the pure distance integral used in the paper.
+
     N = real_flat.shape[0]
     M = gen_flat.shape[0]
     scipy_scaling_factor = (N * M) / (N + M)
@@ -63,8 +61,7 @@ def compute_acf_difference(real_returns: np.ndarray, gen_returns: np.ndarray, l_
 
     acf_real = calc_panel_acf(real_returns)
     acf_gen = calc_panel_acf(gen_returns)
-    
-    # Average absolute discrepancy over channels and lags
+
     abs_diff = np.abs(acf_real - acf_gen)
     return float(np.mean(abs_diff))
 
@@ -85,7 +82,6 @@ def compute_ccf_difference(real_returns: np.ndarray, gen_returns: np.ndarray) ->
     corr_real = np.corrcoef(real_flat, rowvar=False)
     corr_gen = np.corrcoef(gen_flat, rowvar=False)
     
-    # Off-diagonal mask (i != j)
     mask = ~np.eye(d, dtype=bool)
     diff = np.abs(corr_real[mask] - corr_gen[mask])
     
@@ -103,17 +99,14 @@ def compute_es_difference(real_returns: np.ndarray, gen_returns: np.ndarray, alp
     
     es_diffs = []
     for j in range(d):
-        # Real ES
         q_real = np.percentile(real_flat[:, j], alpha * 100)
         tail_real = real_flat[real_flat[:, j] <= q_real, j]
         es_real = np.mean(tail_real)
         
-        # Generated ES
         q_gen = np.percentile(gen_flat[:, j], alpha * 100)
         tail_gen = gen_flat[gen_flat[:, j] <= q_gen, j]
         es_gen = np.mean(tail_gen)
         
-        # Relative difference
         rel_diff = np.abs(es_real - es_gen) / (np.abs(es_real) + 1e-8)
         es_diffs.append(rel_diff)
         
@@ -126,7 +119,6 @@ def plot_jump_diagnostics(real_returns: np.ndarray, gen_returns: np.ndarray):
     """
     fig, axes = plt.subplots(1, 2, figsize=(15, 5))
     
-    # 1. Single Path Realization (Asset 0, First Segment)
     axes[0].plot(real_returns[0, :, 0], label='Real (Jump Only)', marker='o', linestyle='-', color='black')
     axes[0].plot(gen_returns[0, :, 0], label='Generated', marker='x', linestyle='--', color='red', alpha=0.7)
     axes[0].set_title("Step-by-Step Returns: Single Path")
@@ -135,7 +127,6 @@ def plot_jump_diagnostics(real_returns: np.ndarray, gen_returns: np.ndarray):
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     
-    # 2. Log-Scaled Histogram of All Returns (Asset 0)
     axes[1].hist(real_returns[:, :, 0].flatten(), bins=100, alpha=0.5, label='Real', color='black', log=True)
     axes[1].hist(gen_returns[:, :, 0].flatten(), bins=100, alpha=0.5, label='Generated', color='red', log=True)
     axes[1].set_title("Distribution of Returns (Log Scale)")
@@ -157,40 +148,32 @@ def analyze_jump_behavior(real_returns: np.ndarray, gen_returns: np.ndarray, thr
     print(f"      JUMP BEHAVIOR ANALYSIS (Threshold = {threshold})")
     print("=" * 50)
     
-    # We analyze Asset 0 for simplicity, but you can loop this over all d assets
     real_asset = real_returns[:, :, 0]
     gen_asset = gen_returns[:, :, 0]
     
-    # 1. Identify where jumps occur (absolute return > threshold)
     real_jump_mask = np.abs(real_asset) > threshold
     gen_jump_mask = np.abs(gen_asset) > threshold
     
-    # 2. Calculate Annualized Frequency (Intensity lambda)
-    # Assuming dt = 1/252 (252 trading days in a year)
     real_jumps_per_year = np.mean(real_jump_mask) * 252
     gen_jumps_per_year = np.mean(gen_jump_mask) * 252
     
-    # 3. Extract the actual signed sizes of the jumps
     real_jump_sizes = real_asset[real_jump_mask]
     gen_jump_sizes = gen_asset[gen_jump_mask]
     
-    # 4. Calculate Conditional Jump Size Statistics
     real_mean, real_std = np.mean(real_jump_sizes), np.std(real_jump_sizes)
     
     if len(gen_jump_sizes) > 0:
         gen_mean, gen_std = np.mean(gen_jump_sizes), np.std(gen_jump_sizes)
     else:
-        gen_mean, gen_std = 0.0, 0.0 # Fallback if model generated zero jumps
+        gen_mean, gen_std = 0.0, 0.0
         
     print(f"Jump Intensity (Jumps/Year): Real = {real_jumps_per_year:.2f} | Gen = {gen_jumps_per_year:.2f}")
     print(f"Conditional Jump Mean:       Real = {real_mean:.4f} | Gen = {gen_mean:.4f}")
     print(f"Conditional Jump Volatility: Real = {real_std:.4f} | Gen = {gen_std:.4f}")
     print("=" * 50)
     
-    # 5. Visualize the Conditional Jump Distributions
     plt.figure(figsize=(10, 6))
     
-    # We use a histogram only on the filtered jump sizes
     plt.hist(real_jump_sizes, bins=50, alpha=0.5, label='Real Jumps', color='black', density=True)
     
     if len(gen_jump_sizes) > 0:
@@ -221,7 +204,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Running evaluation on device: {device}")
     
-    # --- Load Data ---
     print(f"Loading dataset from {cfg.train.dataset_path}...")
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     train_path = data_dict["train_path"]
@@ -236,7 +218,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     print(f"Loading checkpoint: {ckpt_path}...")
     checkpoint = torch.load(ckpt_path, map_location=device)
     
-    # --- Extract Scaling Parameters ---
     if 'data_mean' in checkpoint and 'data_std' in checkpoint:
         data_mean_tensor = checkpoint['data_mean'].to(device)
         data_std_tensor = checkpoint['data_std'].to(device)
@@ -248,7 +229,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     data_mean_np = data_mean_tensor.cpu().numpy()
     data_std_np = data_std_tensor.cpu().numpy()
     
-    # --- Extract Non-Overlapping Windows ---
     N_len = test_paths.size(1)
     q = cfg.model.q_len
     T = cfg.model.T_len
@@ -264,7 +244,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     real_returns = torch.cat(all_real_returns, dim=0).numpy() # (B, T, d)
     scaled_contexts = (raw_contexts - data_mean_tensor) / data_std_tensor
     
-    # --- Load Generator ---
     gen = build_generator(cfg.model).to(device)
     if 'generator_state_dict' in checkpoint:
         gen.load_state_dict(checkpoint['generator_state_dict'])
@@ -272,7 +251,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
         gen.load_state_dict(checkpoint)
     gen.eval()
     
-    # --- Batched Generation ---
     print(f"Generating synthetic paths for {len(scaled_contexts)} evaluation segments...")
     batch_size = 2048
     generated_scaled_list = []
@@ -286,7 +264,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     generated_scaled = torch.cat(generated_scaled_list, dim=0)
     gen_returns = generated_scaled.cpu().numpy() * data_std_np + data_mean_np # (B, T, d)
     
-    # --- Calculate Metrics ---
     print("\n" + "=" * 50)
     print("      DISTRIBUTIONAL METRICS EVALUATION")
     print("=" * 50)
@@ -314,7 +291,6 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     print(f"Expected Shortfall Diff (ES):  {results['ES']:.6f}")
     print("=" * 50)
     
-    # --- Save Results to JSON ---
     json_path = os.path.join(save_dir, "distributional_metrics.json")
     with open(json_path, "w") as f:
         json.dump(results, f, indent=4)

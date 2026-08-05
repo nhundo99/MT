@@ -5,31 +5,30 @@ import os
 # 1. BASE CLASS: Everything both simulators share
 @dataclass
 class BaseDataConfig:
-    simulator: str = "Unknown" # We will overwrite this in subclasses
+    simulator: str = "Unknown"
     H: int = 2048
     J: int = 2048
     N: int = 2048
-    mu: float = 0.00
-    sigma: float = 0.0
+    mu: float = 0.09
+    sigma: float = 0.2
     corr_matrix: list = field(default_factory=lambda: [
         [1.0, 0.6, 0.3],
         [0.6, 1.0, -0.5],
         [0.3, -0.5, 1.0]
     ])
 
-# 2. GBM CLASS: Just inherits the base stuff!
+# 2. GBM CLASS
 @dataclass
 class GBMDataConfig(BaseDataConfig):
     simulator: str = "GBM"
-    # Doesn't need any extra parameters
 
-# 3. JD CLASS: Adds the jump-specific parameters
+# 3. JD CLASS: jump-specific parameters
 @dataclass
 class JDDataConfig(BaseDataConfig):
     simulator: str = "JumpDiffusion"
-    jump_intensity: float = 4.0
+    jump_intensity: float = 0.0
     jump_mean: float = 0.0
-    jump_std: float = 0.15
+    jump_std: float = 0.0
 
 @dataclass
 class ModelConfig:
@@ -42,59 +41,55 @@ class ModelConfig:
     M: int = 256
     W: int = 2
     L: int = 9
+    generator_type: str = "standard"  # if changes to generator are needed. Options: "standard"
 
 @dataclass
 class TrainConfig:
     batch_size: int = 256
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
-    total_steps: int = 50000
+    total_steps: int = 10000
     resample_freq: int = 100
-    log_freq: int = 10          
-    save_freq: int = 10000      
+    log_freq: int = 10
+    save_freq: int = 10000
     
-    # --- NEW: Drift Regularization ---
+    # --- Drift Regularization ---
     regularize_drift: bool = True
-    lambda_reg: float = 10000.0
+    drift_control_type: str = "monte_carlo"  # Options: "global", "conditional", "monte_carlo"; monte_carlo is what we want
+    lambda_reg: float = 1.0
+    mc_samples: int = 10000
     target_drift: float = 0.0
     
-    experiment_name: str = "regularized" 
-    
+    experiment_name: str = "monte_carlo_regularized_most_samples"
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
     
-    # These will be auto-filled, so we default them to None
     dataset_path: str = None
-    tb_dir: str = None 
+    tb_dir: str = None
     save_dir: str = None
 
 @dataclass
 class Config:
     seed: int = 42
-    dataset_name: str = "GBM_Mu_0p15" 
+    dataset_name: str = "GBM_wrong_drift" 
     
-    # --- NEW: Evaluation Override ---
+    # --- Evaluation Override ---
     # Leave empty ("") when training a new model.
     # Paste the exact folder name here when running analysis scripts!
-    eval_run_name: str = "20260714_1329_GBM_Mu_0p15_regularized" 
+    eval_run_name: str = "20260724_1304_GBM_wrong_drift_monte_carlo_regularized" 
     
-    data: BaseDataConfig = field(default_factory=JDDataConfig) 
+    data: BaseDataConfig = field(default_factory=GBMDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
     def __post_init__(self):
-        # 1. Build the dataset path
-        self.train.dataset_path = f"data/drift_sweep/{self.dataset_name}.pt"
+        self.train.dataset_path = f"data/{self.dataset_name}.pt"
         
-        # 2. The Override Logic
         if self.eval_run_name != "":
-            # If you provided a name, use it EXACTLY as-is (no new timestamp)
             self.train.experiment_name = self.eval_run_name
         else:
-            # Otherwise, generate a fresh timestamp for a new training run
             timestamp = time.strftime("%Y%m%d_%H%M")
             self.train.experiment_name = f"{timestamp}_{self.dataset_name}_{self.train.experiment_name}"
         
-        # 3. Automatically build the final save directories
         self.train.tb_dir = os.path.join(self.train.tb_base_dir, self.train.experiment_name)
         self.train.save_dir = os.path.join(self.train.model_base_dir, self.train.experiment_name)

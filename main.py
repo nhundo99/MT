@@ -9,17 +9,14 @@ from training import *
 from utils import *
 from config import Config, GBMDataConfig, JDDataConfig
 
-# 1. Instantiate the config
 cfg = Config()
 seed_everything(cfg.seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 print(f"Using device: {device}")
 
-# 2. Setup TensorBoard Writer
 writer = SummaryWriter(log_dir=cfg.train.tb_dir)
 
-# 3. Load pre-generated dataset (Using config!)
 print(f"Loading dataset from {cfg.train.dataset_path}...")
 data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
 hist_path = data_dict["train_path"]
@@ -27,7 +24,6 @@ hist_path = data_dict["train_path"]
 if "dataset_config" in data_dict:
     loaded_data_cfg = data_dict["dataset_config"]
     
-    # Check the string we saved to know which class to rebuild!
     if loaded_data_cfg.get("simulator") == "GBM":
         cfg.data = GBMDataConfig(**loaded_data_cfg)
     else:
@@ -35,11 +31,9 @@ if "dataset_config" in data_dict:
         
     print(f"Loaded {cfg.data.simulator} dataset parameters for: {cfg.dataset_name}")
 
-# 4. Create dataset & loader
 dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
 dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
 
-# 5. Instantiate models
 sock = SOCK(
     n_steps=cfg.model.q_len + cfg.model.T_len,
     n_channels=cfg.model.d,
@@ -47,11 +41,11 @@ sock = SOCK(
     k=cfg.model.K,
     mix_dim=cfg.model.M,
     kernel_len=cfg.model.L,
-    augs=("cumsum", "posneg")  
+    kernel_width=cfg.model.W,
+    augs=("cumsum", "posneg", "diff")  
 ) 
-gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
+gen = build_generator(cfg.model).to(device)
 
-# 6. Train
 print("Starting generator training via SOCK feature matching...")
 loss_hist = train_sock_generator(
     generator=gen, 
@@ -60,7 +54,6 @@ loss_hist = train_sock_generator(
     device=device, 
     cfg=cfg,             
     writer=writer,
-    # --- NEW: Pass scaling factors to the training loop so they can be saved ---
     data_mean=dataset.mean,
     data_std=dataset.std
 )

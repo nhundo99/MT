@@ -15,19 +15,16 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     seed_everything(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
-    # 1. Load data
     print(f"Loading dataset from {cfg.train.dataset_path}...")
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     train_path = data_dict["train_path"]
     test_paths = data_dict["test_paths"] # Shape: (J, N, d) = (2048, 2048, d)
     
-    # We still use the dataset object to access the train path's standardizer
     dataset = FinancialTimeSeriesDataset(train_path, q=cfg.model.q_len, T=cfg.model.T_len)
     mean = dataset.mean.squeeze().cpu().numpy()
     std = dataset.std.squeeze().cpu().numpy()
     
     print("Extracting Ground Truth Returns from independent continuations...")
-    # The true marginal is perfectly represented by flattening the out-of-sample test paths
     real_returns_flat = test_paths[:, :, 0].numpy().flatten()
 
     kde_real = gaussian_kde(real_returns_flat)
@@ -39,12 +36,12 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     
     save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
     plot_dir = os.path.join(save_dir, "plots")
-    stats_dir = os.path.join(save_dir, "statistics") # NEW: Statistics directory
+    stats_dir = os.path.join(save_dir, "statistics")
     
     os.makedirs(plot_dir, exist_ok=True)
-    os.makedirs(stats_dir, exist_ok=True) # Ensure stats directory exists
+    os.makedirs(stats_dir, exist_ok=True)
     
-    num_samples = test_paths.size(0) # Exactly J=2048 to match the real continuations
+    num_samples = test_paths.size(0)
     
     context = dataset.scaled_path[-cfg.model.q_len:].unsqueeze(0).to(device)
     batched_context = context.repeat(num_samples, 1, 1)
@@ -52,7 +49,6 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
     checkpoints = [(step, f"generator_step_{step}.pt") for step in checkpoints_to_plot]
     checkpoints.append(("Final", "generator_final.pt"))
 
-    # NEW: List to accumulate statistical results for the CSV
     all_statistics = []
 
     for step_label, ckpt_name in checkpoints:
@@ -76,12 +72,10 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         generated_returns = generated_scaled.cpu().numpy() * std + mean
         generated_returns_flat = generated_returns[:, :, 0].flatten()
         
-        # --- NEW: Statistical Quantification ---
         w_dist = wasserstein_distance(real_returns_flat, generated_returns_flat)
         cvm_res = cramervonmises_2samp(real_returns_flat, generated_returns_flat)
         ks_stat, _ = ks_2samp(real_returns_flat, generated_returns_flat)
-        
-        # Save results to our list
+
         all_statistics.append({
             "Checkpoint": step_label,
             "Wasserstein_Distance": w_dist,
@@ -89,10 +83,8 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
             "KS_Statistic": ks_stat
         })
         
-        # Print to console for immediate feedback
         print(f"  -> Wasserstein: {w_dist:.6f} | CvM: {cvm_res.statistic:.6f} | KS: {ks_stat:.6f}")
 
-        # 4. Plotting
         kde_gen = gaussian_kde(generated_returns_flat)
         pdf_gen = kde_gen(x_grid) 
 
@@ -113,10 +105,8 @@ def plot_probability_densities(checkpoints_to_plot=[10000, 50000, 100000]):
         plt.savefig(save_path, format='pdf', bbox_inches='tight')
         plt.close()
         
-    # --- NEW: Save all collected statistics to a CSV file ---
     if all_statistics:
         csv_path = os.path.join(stats_dir, "marginal_density_metrics.csv")
-        # Define the headers based on the dictionary keys
         headers = ["Checkpoint", "Wasserstein_Distance", "CvM_Statistic", "KS_Statistic"]
         
         with open(csv_path, mode='w', newline='') as file:

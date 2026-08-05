@@ -32,40 +32,30 @@ def plot_full_autoregressive_rollout(
     q = dataset.q
     T = dataset.T
     
-    # 1. Start with the very first 'q' steps of the scaled real data
     current_context = dataset.scaled_path[:q].unsqueeze(0).to(device) # Shape: (1, q, d)
     
-    # We will store our generated chunks here (starting with the initial real context)
     generated_chunks = [current_context.squeeze(0).cpu().numpy()]
     
     steps_generated = q
     
-    # 2. Autoregressively generate chunks of length T until we hit H
     with torch.no_grad():
         while steps_generated < H:
-            # Generate the next T steps
             next_T = generator(current_context, n_steps=T) # Shape: (1, T, d)
             
-            # Store the generated chunk
             generated_chunks.append(next_T.squeeze(0).cpu().numpy())
             steps_generated += T
             
-            # Update context for the next loop: use the last 'q' steps of the generated chunk
             current_context = next_T[:, -q:, :]
             
-    # 3. Stitch chunks together and trim to exact length H
     full_generated_scaled = np.concatenate(generated_chunks, axis=0)[:H]
     
-    # 4. Un-standardize the generated path back to the original returns scale
     mean = dataset.mean.squeeze().cpu().numpy()
     std = dataset.std.squeeze().cpu().numpy()
     full_generated_returns = full_generated_scaled * std + mean
     
-    # 5. Convert returns to log prices via cumulative sum
     generated_log_prices = np.cumsum(full_generated_returns, axis=0)
     real_log_prices = np.cumsum(path_tensor.cpu().numpy(), axis=0)
     
-    # 6. Plotting
     plt.figure(figsize=(12, 6))
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'] 
     
@@ -85,7 +75,6 @@ def plot_full_autoregressive_rollout(
     plt.tight_layout()
 
     if save_path is not None:
-        # bbox_inches='tight' ensures that no axis labels or legends get cut off in the PDF
         plt.savefig(save_path, format='pdf', bbox_inches='tight')
         print(f"Saved plot to: {save_path}")
 

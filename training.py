@@ -5,16 +5,15 @@ from torch.utils.data import Dataset, DataLoader
 from dataclasses import asdict
 
 def train_sock_generator(
-    generator: nn.Module, 
-    sock_extractor: nn.Module, 
-    dataloader: torch.utils.data.DataLoader, 
-    device: str, 
-    cfg,            # <--- Receive config
-    writer,          
-    data_mean: torch.Tensor, # <-- NEW
-    data_std: torch.Tensor   # <-- NEW
+    generator: nn.Module,
+    sock_extractor: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: str,
+    cfg,
+    writer,
+    data_mean: torch.Tensor,
+    data_std: torch.Tensor
 ):
-    # Use config for training parameters
     os.makedirs(cfg.train.save_dir, exist_ok=True)     
     
     generator.to(device)
@@ -23,17 +22,14 @@ def train_sock_generator(
     optimizer = torch.optim.AdamW(generator.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
     
     warmup_steps = int(0.05 * cfg.train.total_steps)
-    decay_start = int(0.30 * cfg.train.total_steps) # Decay starts at the 30% mark to cover the last 70%
+    decay_start = int(0.30 * cfg.train.total_steps)
     
     def lr_lambda(current_step):
         if current_step < warmup_steps:
-            # 1. Linear warm up for first 5%
             return float(current_step) / float(max(1, warmup_steps))
         elif current_step < decay_start:
-            # 2. Stay flat at max learning rate until the decay phase starts
             return 1.0
         else:
-            # 3. Linear decay to 0 over the last 70% of steps
             decay_steps = cfg.train.total_steps - decay_start
             steps_passed = current_step - decay_start
             return max(0.0, float(decay_steps - steps_passed) / float(max(1, decay_steps)))
@@ -42,12 +38,10 @@ def train_sock_generator(
     
     generator.train()
 
-    # 1. Extract a single batch to fit the input scales for the augmented paths
     x_minus_sample, x_plus_sample = next(iter(dataloader))
     real_joined_sample = torch.cat([x_minus_sample, x_plus_sample], dim=1).to(device)
     sock_extractor.fit_input_scales(dataloader, device)
     
-    # 2. Fit feature scales
     sock_extractor.fit_ft_scales(dataloader, device)
     
     loss_history = []
@@ -72,86 +66,58 @@ def train_sock_generator(
         
         optimizer.zero_grad()
         
-        # Forward pass
         x_hat_plus = generator(x_minus, n_steps=x_plus.size(1))
-        
-        # Joined Segments
+
         real_joined = torch.cat([x_minus, x_plus], dim=1)
         fake_joined = torch.cat([x_minus, x_hat_plus], dim=1)
-        
-        # Extract Scaled Features
+
         real_feats = sock_extractor(real_joined, scale=True)
         fake_feats = sock_extractor(fake_joined, scale=True)
         
-        # Mean Squared Error (Summed across the feature dimensions to match L2^2 norm)
         real_mean = real_feats.mean(dim=0)
         fake_mean = fake_feats.mean(dim=0)
         loss_sock = torch.nn.functional.mse_loss(fake_mean, real_mean, reduction='mean')
         
-        # Accumulate total loss dynamically
         loss = loss_sock
         
-        # --- Corrected Drift Regularization ---
+        # Drift Regularization
         if cfg.train.regularize_drift:
             if cfg.train.drift_control_type == "conditional":
-                # 1. Path-by-path matching (The original approach)
-                # Calculates mean per path (dim=1 corresponds to the T=64 time steps)
                 generated_drift = x_hat_plus.mean(dim=1)
                 real_drift = x_plus.mean(dim=1)
                 
-                # Penalizes the network if individual paths don't match specific noise
                 loss_drift = torch.nn.functional.mse_loss(generated_drift, real_drift, reduction='mean')
                 
             elif cfg.train.drift_control_type == "global":
-                # 2. Macroscopic matching 
-                # Calculate the expected value across the batch and time steps, 
-                # BUT keep the asset dimensions separate!
                 expected_model_drift = x_hat_plus.mean(dim=(0, 1)) 
                 
-                # Target is dynamically pulled from the config (e.g., 0.0)
-                # PyTorch will automatically broadcast this scalar to match the 'd' asset channels
                 target = torch.tensor(cfg.train.target_drift, device=device)
-                
-                # Penalizes the network if ANY INDIVIDUAL ASSET'S global expectation drifts
+            
                 loss_drift = torch.nn.functional.mse_loss(expected_model_drift, target.expand_as(expected_model_drift))
             
             elif cfg.train.drift_control_type == "monte_carlo":
-                # 1. Tile the current contexts to reach the massive MC sample size (e.g., 10,000)
                 num_repeats = max(1, cfg.train.mc_samples // x_minus.size(0))
                 mc_contexts = x_minus.repeat(num_repeats, 1, 1)
 
-                # 2. Generate the Monte Carlo future paths
                 mc_fake_scaled = generator(mc_contexts, n_steps=x_plus.size(1))
 
-                # 3. Un-scale the outputs back to real-world returns
                 mc_fake_returns = mc_fake_scaled * data_std.to(device) + data_mean.to(device)
 
-                # 4. Calculate the annualized drift from the generated paths
                 mc_annualized_drift = mc_fake_returns.mean(dim=(0, 1)) * 252.0
 
-                # 5. Extract the true ground-truth parameters from the loaded dataset
-                # (These are guaranteed to be correct because main.py overwrote cfg.data)
                 true_mu = cfg.data.mu
                 true_sigma = cfg.data.sigma
                 
-                # 6. Apply Ito's correction to the target drift
+                # Only Works for GBM TODO: Change this
                 adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
-                
-                # 7. Calculate loss against the adjusted target
+
                 target_tensor = torch.tensor(adjusted_target, device=device).expand_as(mc_annualized_drift)
                 loss_drift = torch.nn.functional.mse_loss(mc_annualized_drift, target_tensor)
                 
             else:
                 raise ValueError(f"Unknown drift control type: {cfg.train.drift_control_type}")
 
-            # Apply the weighted penalty to the total loss
             loss = loss + (cfg.train.lambda_reg * loss_drift)
-            
-        # --- NEW: Sparsity Regularization ---
-        if cfg.train.regularize_sparsity:
-            loss_sparsity = torch.mean(torch.abs(x_hat_plus))
-            loss = loss + (cfg.train.lambda_sparse * loss_sparsity)
-        # ---------------------------------
         
         loss.backward()
         optimizer.step()
@@ -167,13 +133,8 @@ def train_sock_generator(
             if cfg.train.regularize_drift:
                 writer.add_scalar("Loss/train_drift_penalty", loss_drift.item(), step_count)
                 
-            # Log sparsity tracking if enabled
-            if cfg.train.regularize_sparsity:
-                writer.add_scalar("Loss/train_sparsity_penalty", loss_sparsity.item(), step_count)
-                
             writer.add_scalar("LearningRate/train", scheduler.get_last_lr()[0], step_count)
         
-        # --- Model Checkpointing Logic ---
         if step_count % cfg.train.save_freq == 0:
             save_path = os.path.join(cfg.train.save_dir, f"generator_step_{step_count}.pt")
             
@@ -184,14 +145,13 @@ def train_sock_generator(
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': loss.item(),
                 'config': asdict(cfg),
-                'data_mean': data_mean, # <-- SAVE MEAN
-                'data_std': data_std    # <-- SAVE STD
+                'data_mean': data_mean,
+                'data_std': data_std
             }, save_path)
             
             print(f"Checkpoint saved to {save_path}")
         # --------------------------------------
             
-    # Save a final model at the very end just to be safe
     final_save_path = os.path.join(cfg.train.save_dir, "generator_final.pt")
     torch.save({
         'generator_state_dict': generator.state_dict(),

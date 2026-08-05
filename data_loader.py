@@ -29,26 +29,20 @@ class JumpDiffusionSimulator:
         self.L = torch.linalg.cholesky(self.corr_matrix + jitter)
 
     def simulate(self, H: int, dt: float = 1/252) -> torch.Tensor:
-        # --- Correlated Brownian Motion ---
-        # Generate independent standard normal random variables
         Z = torch.randn(H, self.d) 
         
-        # Induce correlation: Multiply by the Cholesky lower triangular matrix
         # Shape: (H, d) @ (d, d) -> (H, d)
         Z_corr = Z @ self.L.T 
         
         dW = Z_corr * math.sqrt(dt)
         
         # --- Jumps ---
-        # Jumps are typically modeled as independent idiosyncratic shocks 
-        # (unless you specifically want co-jumps/market-wide shocks)
+        # independent shocks
         n_jumps = torch.poisson(torch.ones(H, self.d) * self.jump_intensity * dt)
         J = torch.sqrt(n_jumps) * torch.randn(H, self.d) * self.jump_std + n_jumps * self.jump_mean
         
-        # Log returns
         returns = (self.mu - 0.5 * self.sigma**2) * dt + self.sigma * dW + J
         
-        # Return stationary log-returns, NOT log-prices
         return returns
 
 class GeometricBrownianMotionSimulator:
@@ -74,20 +68,15 @@ class GeometricBrownianMotionSimulator:
         self.L = torch.linalg.cholesky(self.corr_matrix + jitter)
 
     def simulate(self, H: int, dt: float = 1/252) -> torch.Tensor:
-        # --- Correlated Brownian Motion ---
-        # Generate independent standard normal random variables
         Z = torch.randn(H, self.d) 
         
-        # Induce correlation: Multiply by the Cholesky lower triangular matrix
         # Shape: (H, d) @ (d, d) -> (H, d)
         Z_corr = Z @ self.L.T 
         
         dW = Z_corr * math.sqrt(dt)
         
-        # Log returns (Standard Ito calculus drift + diffusion)
         returns = (self.mu - 0.5 * self.sigma**2) * dt + self.sigma * dW
         
-        # Return stationary log-returns, NOT log-prices
         return returns
 
 class FinancialTimeSeriesDataset(Dataset):

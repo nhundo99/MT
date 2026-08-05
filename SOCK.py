@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 class CumSumAug(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        # It adds the same number of channels it receives
         self.n_add_channels = in_channels 
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -28,7 +27,6 @@ class DiffAug(nn.Module):
 class PosNegAug(nn.Module):
     def __init__(self, in_channels: int):
         super().__init__()
-        # PosNeg adds two new channels (positive and negative parts) for every input channel
         self.n_add_channels = 2 * in_channels 
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -65,12 +63,12 @@ class SOCK(nn.Module):
         k: int = 8,
         mix_dim: int = 256,
         kernel_len: int = 9,
+        kernel_width: int = 2,
         augs: tuple[str, ...] = ("cumsum",),
     ) -> None:
         super().__init__()
         self.tau, self.k = tau, k
         
-        # Dynamically build augmentations to compute final channel dimension
         aug_modules = []
         current_channels = n_channels
         for aug in augs:
@@ -80,13 +78,11 @@ class SOCK(nn.Module):
             
         self.augs = nn.Sequential(*aug_modules)
         
-        # Exactly matches pseudocode: n_channels + sum(aug.n_add_channels for aug in self.augs)
         self.proj = nn.Linear(n_channels + sum(aug.n_add_channels for aug in self.augs), mix_dim, bias=False)
         
         emax = math.log2((n_steps - 1) / (kernel_len - 1))
         self.dilations = (2 ** torch.arange(int(emax) + 1)).int()
         
-        kernel_width = 2
         self.convs = nn.ModuleList()
         for d in self.dilations:
             self.convs.append(
@@ -101,10 +97,9 @@ class SOCK(nn.Module):
                 )
             )
             
-        for p in self.parameters(): # SOCK's parameters are untrained, only need gradient w.r.t input x
+        for p in self.parameters():
             p.requires_grad = False
             
-        # Variables initialized to None for scale fitting (mimics pseudocode logic)
         self.ft_mean = None
         self.ft_scl = None
         self.input_mean = None
@@ -121,7 +116,7 @@ class SOCK(nn.Module):
 
     def fit_input_scales(self, dataloader: DataLoader, device: str) -> None: 
         all_x_aug = []
-        with torch.no_grad(): # Saves memory
+        with torch.no_grad():
             for x_minus, x_plus in dataloader:
                 x_joined = torch.cat([x_minus.to(device), x_plus.to(device)], dim=1)
                 x_aug = self.augs(x_joined)
@@ -133,7 +128,6 @@ class SOCK(nn.Module):
 
     def fit_ft_scales(self, dataloader: DataLoader, device: str) -> None: 
         # fits (ft_mean, ft_scl); call after every resample
-        # Note: Adapted from pseudocode stub to use your working dataloader loop
         all_feats = []
         for x_minus, x_plus in dataloader:
             x_joined = torch.cat([x_minus.to(device), x_plus.to(device)], dim=1)
@@ -145,7 +139,7 @@ class SOCK(nn.Module):
         self.ft_scl = all_feats.std(dim=0, keepdim=True) + 1e-8
 
     def pool(self, z: torch.Tensor) -> torch.Tensor:
-        # soft-deviation pooling
+        # soft-deviation pooling, TODO: Implement others
         return torch.std(torch.softmax(z / self.tau, dim=2), dim=-1, unbiased=False)
 
     def forward(self, x: torch.Tensor, scale: bool = True) -> torch.Tensor:
@@ -166,63 +160,54 @@ class SOCK(nn.Module):
             
         out = torch.cat(feats, dim=1)
         
-        # Scaling toggle added so your `fit_ft_scales` doesn't throw a NoneType error
         if scale and self.ft_mean is not None and self.ft_scl is not None:
             return (out - self.ft_mean) / self.ft_scl
         return out
 
 # -------------------------------------------------------------------------
-# Conditional Generator
+# Standard Generator
 # -------------------------------------------------------------------------
-class Generator(nn.Module):
+class StandardGenerator(nn.Module):
     def __init__(self, d: int, hidden_dim: int = 128, q: int = 5) -> None:
         super().__init__()
         self.noise_dim = d
         self.initial_noise_dim = d
         
-        # maps (flattened context c, initial noise) -> initial hidden state h0
         self.initial_state_generator = nn.Sequential(
             nn.Linear(d * q + self.initial_noise_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-        
         self.proj_in = nn.Linear(self.noise_dim, 2 * hidden_dim)
         self.rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=1, batch_first=True)
         
-        # residual noise injection: add a gated noise stream after the GRU
+        # Residual noise injection
         self.alpha = nn.Parameter(torch.tensor(0.1))
         self.gate = nn.Sequential(
-            nn.LayerNorm(hidden_dim), 
-            nn.Linear(hidden_dim, hidden_dim), 
-            nn.Sigmoid()
+            nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.Sigmoid()
         )
         self.proj_out = nn.Linear(hidden_dim, d)
 
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        # Stabilizing initialization: ensures generated paths start with small variance
-        nn.init.orthogonal_(self.proj_out.weight, gain=0.01)
-        nn.init.zeros_(self.proj_out.bias)
-        
-        # Optional: scale down the initial state MLP
-        nn.init.orthogonal_(self.initial_state_generator[-1].weight, gain=0.1)
-
     def forward(self, c: torch.Tensor, n_steps: int = 64) -> torch.Tensor:
-        # c.shape = (B, q, d)
-        
-        # sample initial hidden state h0 conditionally on context c
+        # Sample initial hidden state
         initial_noise = torch.randn((c.size(0), self.initial_noise_dim), device=c.device)
         h0_in = torch.cat((c.flatten(start_dim=1), initial_noise), dim=-1)
         h0 = self.initial_state_generator(h0_in)
         
-        # decode per-step noise with: linear proj -> SiLU -> GRU
+        # Decode per-step noise
         z = torch.randn((c.size(0), n_steps, self.noise_dim), device=c.device)
         z, z_skip = self.proj_in(z).chunk(2, dim=-1)
-        
         h, _ = self.rnn(F.silu(z), h0.unsqueeze(0))
-        
-        # optional output noise injection
         h = h + self.alpha * self.gate(h) * z_skip
+        
         return self.proj_out(h)
+
+# -------------------------------------------------------------------------
+# Factory Function
+# -------------------------------------------------------------------------
+def build_generator(model_cfg) -> nn.Module:
+    """Returns the configured generator architecture."""
+    if model_cfg.generator_type == "standard":
+        return StandardGenerator(d=model_cfg.d, q=model_cfg.q_len, hidden_dim=model_cfg.hidden_dim)
+    else:
+        raise ValueError(f"Unknown generator type: {model_cfg.generator_type}")

@@ -1,4 +1,3 @@
-# generate_dataset.py
 from data_loader import JumpDiffusionSimulator, GeometricBrownianMotionSimulator
 from config import Config
 from dataclasses import asdict
@@ -10,10 +9,8 @@ def generate_and_save_dataset():
     cfg = Config()
     seed_everything(cfg.seed)
     
-    # --- NEW: Convert config list to a tensor ---
     rho = torch.tensor(cfg.data.corr_matrix)
     
-    # --- AUTOMATIC ROUTING BASED ON CONFIG ---
     if cfg.data.simulator == "JumpDiffusion":
         print("Initializing Jump Diffusion Simulator...")
         sim = JumpDiffusionSimulator(

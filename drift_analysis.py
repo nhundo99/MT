@@ -1,4 +1,3 @@
-# numerical_drift_analysis.py
 import torch
 import numpy as np
 import os
@@ -13,7 +12,6 @@ def evaluate_numerical_drift(cfg, ckpt_step="final"):
     """
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     
-    # 1. Load Data
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     train_path = data_dict["train_path"]
     test_paths = data_dict["test_paths"] # Shape: (J, N, d)
@@ -21,9 +19,6 @@ def evaluate_numerical_drift(cfg, ckpt_step="final"):
     # We evaluate on the first channel (Asset 1)
     d_idx = 0 
     
-    # 2. Calculate Theoretical & Realized Ground Truth Drifts
-    # From your simulator: return = (mu - 0.5*sigma^2)*dt + sigma*dW
-    # The annualized theoretical expected log-return is:
     theoretical_annualized_drift = (cfg.data.mu - 0.5 * (cfg.data.sigma**2))
     
     train_returns_flat = train_path[:, d_idx].numpy()
@@ -32,7 +27,6 @@ def evaluate_numerical_drift(cfg, ckpt_step="final"):
     test_returns_flat = test_paths[:, :, d_idx].numpy().flatten()
     realized_test_drift = np.mean(test_returns_flat) * 252
 
-    # 3. Setup Generator and load weights
     gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim).to(device)
     save_dir = cfg.train.save_dir
     
@@ -55,8 +49,6 @@ def evaluate_numerical_drift(cfg, ckpt_step="final"):
     data_mean_tensor = dataset.mean.to(device)
     data_std_tensor = dataset.std.to(device)
 
-    # 4. Generate Futures from out-of-sample contexts
-    # We use independent out-of-sample continuations as contexts for a low-variance estimate
     raw_contexts = test_paths[:, :cfg.model.q_len, :].to(device) 
     scaled_contexts = (raw_contexts - data_mean_tensor) / data_std_tensor
     
@@ -68,7 +60,6 @@ def evaluate_numerical_drift(cfg, ckpt_step="final"):
     
     model_generated_drift = np.mean(generated_returns_flat) * 252
 
-    # 5. Compile Results
     results = {
         "Target_Mu": cfg.data.mu,
         "Theoretical_Drift": theoretical_annualized_drift,

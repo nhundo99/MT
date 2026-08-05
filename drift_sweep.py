@@ -14,7 +14,6 @@ from utils import seed_everything
 from drift_analysis import evaluate_numerical_drift
 
 def run_drift_experiment():
-    # The different population drifts you want to test for your thesis
     mu_values = [-0.15, 0.0, 0.15, 0.30]
     
     all_results = []
@@ -25,24 +24,18 @@ def run_drift_experiment():
         print(f"STARTING EXPERIMENT: POPULATION MU = {mu}")
         print(f"{'='*60}")
         
-        # 1. Build the configuration for this specific mu
         cfg = Config()
         cfg.data = GBMDataConfig(mu=mu, sigma=0.20) 
         
-        # Name the dataset and place it in the drift_sweep subfolder
         mu_str = str(mu).replace(".", "p").replace("-", "neg")
         cfg.dataset_name = f"drift_sweep/GBM_Mu_{mu_str}"
         
-        # Ensure the experiment name is consistent so we can resume/skip properly
         cfg.eval_run_name = f"Sweep_Run_GBM_Mu_{mu_str}"
         
-        # Re-initialize config paths
         cfg.__post_init__()
         
-        # Lower steps for testing if needed (default is 100000 in your config)
         cfg.train.total_steps = 10000 
         
-        # 2. DATA GENERATION STEP (If it does not exist)
         os.makedirs(os.path.dirname(cfg.train.dataset_path), exist_ok=True)
         
         if not os.path.exists(cfg.train.dataset_path):
@@ -63,22 +56,18 @@ def run_drift_experiment():
         else:
             print(f"[*] Data already exists at {cfg.train.dataset_path}. Skipping generation.")
 
-        # 3. TRAINING STEP (If final model does not exist)
         final_model_path = os.path.join(cfg.train.save_dir, "generator_final.pt")
         
         if not os.path.exists(final_model_path):
             print(f"[*] Model not found. Training generator for Mu = {mu}...")
             seed_everything(cfg.seed)
             
-            # Load Data
             data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
             hist_path = data_dict["train_path"]
             
-            # Setup DataLoader
             dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
             dataloader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=True, drop_last=True)
             
-            # Initialize Models
             sock = SOCK(n_steps=cfg.model.q_len + cfg.model.T_len, n_channels=cfg.model.d, tau=cfg.model.tau, k=cfg.model.K, mix_dim=cfg.model.M, kernel_len=cfg.model.L, augs=("cumsum", "posneg")) 
             gen = Generator(d=cfg.model.d, q=cfg.model.q_len, hidden_dim=cfg.model.hidden_dim)
             
@@ -88,7 +77,6 @@ def run_drift_experiment():
         else:
             print(f"[*] Trained model already exists at {final_model_path}. Skipping training.")
 
-        # 4. EVALUATION STEP
         print(f"[*] Evaluating drift metrics for Mu = {mu}...")
         results = evaluate_numerical_drift(cfg, ckpt_step="final")
         
@@ -99,7 +87,6 @@ def run_drift_experiment():
                 print(f"  {k}: {v:.6f}")
             print("------------------------------\n")
 
-    # 5. SAVE CSV
     if all_results:
         csv_file = "drift_analysis_thesis_results.csv"
         with open(csv_file, 'w', newline='') as f:

@@ -14,7 +14,9 @@ def train_sock_generator(
     data_mean: torch.Tensor,
     data_std: torch.Tensor
 ):
-    os.makedirs(cfg.train.save_dir, exist_ok=True)     
+    os.makedirs(cfg.train.save_dir, exist_ok=True)
+    dataset = torch.load(cfg.train.dataset_path, map_location="cpu")
+    ds_cfg = dataset.get("dataset_config", {})  
     
     generator.to(device)
     sock_extractor.to(device)
@@ -104,15 +106,72 @@ def train_sock_generator(
                 mc_fake_returns = mc_fake_scaled * data_std.to(device) + data_mean.to(device)
 
                 mc_annualized_drift = mc_fake_returns.mean(dim=(0, 1)) * 252.0
-
-                true_mu = cfg.data.mu
-                true_sigma = cfg.data.sigma
                 
-                # Only Works for GBM TODO: Change this
-                adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
+                sim_type = ds_cfg.get("simulator", "GBM")
+                true_mu = ds_cfg.get("mu", 0.0)
+                true_sigma = ds_cfg.get("sigma", 0.0)
+                
+                if sim_type == "GBM":
+                    adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
+                    
+                elif sim_type == "JumpDiffusion":
+                    jump_intensity = ds_cfg.get("jump_intensity", 0.0)
+                    jump_mean = ds_cfg.get("jump_mean", 0.0)
+                    
+                    adjusted_target = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
+                    
+                else:
+                    raise ValueError(f"Unknown simulator type for target drift calculation: {sim_type}")
 
                 target_tensor = torch.tensor(adjusted_target, device=device).expand_as(mc_annualized_drift)
                 loss_drift = torch.nn.functional.mse_loss(mc_annualized_drift, target_tensor)
+            
+            elif cfg.train.drift_control_type == "long_monte_carlo":
+                num_repeats = max(1, cfg.train.mc_samples // x_minus.size(0))
+                current_context = x_minus.repeat(num_repeats, 1, 1)
+                
+                q = current_context.size(1)
+                T = x_plus.size(1)
+                
+                H = cfg.train.long_mc_horizon 
+                
+                mc_fake_scaled_list = []
+                steps_generated = 0
+                
+                while steps_generated < H:
+                    next_T = generator(current_context, n_steps=T)
+                    mc_fake_scaled_list.append(next_T)
+                    
+                    steps_generated += T
+                    
+                    combined_context = torch.cat([current_context, next_T], dim=1)
+                    current_context = combined_context[:, -q:, :]
+                
+                mc_fake_scaled_full = torch.cat(mc_fake_scaled_list, dim=1)[:, :H, :]
+                
+                mc_fake_returns_full = mc_fake_scaled_full * data_std.to(device) + data_mean.to(device)
+                
+                mc_annualized_drift = mc_fake_returns_full.mean(dim=(0, 1)) * 252.0
+                
+                sim_type = ds_cfg.get("simulator", "GBM")
+                true_mu = ds_cfg.get("mu", 0.0)
+                true_sigma = ds_cfg.get("sigma", 0.0)
+                
+                if sim_type == "GBM":
+                    adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
+                    
+                elif sim_type == "JumpDiffusion":
+                    jump_intensity = ds_cfg.get("jump_intensity", 0.0)
+                    jump_mean = ds_cfg.get("jump_mean", 0.0)
+                    adjusted_target = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
+                    
+                else:
+                    raise ValueError(f"Unknown simulator type for target drift calculation: {sim_type}")
+
+                target_tensor = torch.tensor(adjusted_target, device=device).expand_as(mc_annualized_drift)
+                loss_drift = torch.nn.functional.mse_loss(mc_annualized_drift, target_tensor)
+                print(f"the adjusted target drift is: {target_tensor}")
+                print(f"the annualized drift is: {mc_annualized_drift}")
                 
             else:
                 raise ValueError(f"Unknown drift control type: {cfg.train.drift_control_type}")

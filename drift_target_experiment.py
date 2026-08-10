@@ -90,8 +90,8 @@ def run_comparison():
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     
     # CHANGE TO PICK COMPARISON
-    baseline_run = "20260724_1239_GBM_wrong_drift_monte_carlo_not_regularized"
-    regularized_run = "20260724_1304_GBM_wrong_drift_monte_carlo_regularized"
+    baseline_run = "20260806_0920_GBM_wrong_drift_monte_carlo_not_regularized"
+    regularized_run = "20260806_1601_GBM_wrong_drift_monte_carlo_regularized_50000_steps"
     
     n_paths = 100000
     years = 8.0

@@ -206,8 +206,18 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     
     print(f"Loading dataset from {cfg.train.dataset_path}...")
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
-    train_path = data_dict["train_path"]
-    test_paths = data_dict["test_paths"] # Shape: (J, N, d)
+    
+    # 1. Conditionally load and concatenate volatility for testing
+    use_volatility = getattr(cfg.train, 'use_volatility', False)
+    
+    if use_volatility and "train_vol" in data_dict and "test_vols" in data_dict:
+        print("Volatility usage ENABLED. Concatenating returns and volatility paths for evaluation...")
+        train_data = torch.cat([data_dict["train_path"], data_dict["train_vol"]], dim=-1)
+        test_data = torch.cat([data_dict["test_paths"], data_dict["test_vols"]], dim=-1)
+    else:
+        print("Using standard returns path...")
+        train_data = data_dict["train_path"]
+        test_data = data_dict["test_paths"]
     
     save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
     ckpt_path = os.path.join(save_dir, checkpoint_name)
@@ -218,30 +228,31 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     print(f"Loading checkpoint: {ckpt_path}...")
     checkpoint = torch.load(ckpt_path, map_location=device)
     
+    # 2. Compute mean/std based on the joint train_data if missing
     if 'data_mean' in checkpoint and 'data_std' in checkpoint:
         data_mean_tensor = checkpoint['data_mean'].to(device)
         data_std_tensor = checkpoint['data_std'].to(device)
     else:
         print("Warning: data_mean/data_std missing in checkpoint. Calculating from train path...")
-        data_mean_tensor = train_path.mean(dim=0, keepdim=True).to(device)
-        data_std_tensor = train_path.std(dim=0, keepdim=True).to(device) + 1e-6
+        data_mean_tensor = train_data.mean(dim=0, keepdim=True).to(device)
+        data_std_tensor = train_data.std(dim=0, keepdim=True).to(device) + 1e-6
         
     data_mean_np = data_mean_tensor.cpu().numpy()
     data_std_np = data_std_tensor.cpu().numpy()
     
-    N_len = test_paths.size(1)
+    N_len = test_data.size(1)
     q = cfg.model.q_len
     T = cfg.model.T_len
     
     all_raw_contexts = []
-    all_real_returns = []
+    all_real_data = []
     
     for t in range(0, N_len - q - T + 1, T):
-        all_raw_contexts.append(test_paths[:, t : t + q, :])
-        all_real_returns.append(test_paths[:, t + q : t + q + T, :])
+        all_raw_contexts.append(test_data[:, t : t + q, :])
+        all_real_data.append(test_data[:, t + q : t + q + T, :])
         
     raw_contexts = torch.cat(all_raw_contexts, dim=0).to(device)
-    real_returns = torch.cat(all_real_returns, dim=0).numpy() # (B, T, d)
+    real_data = torch.cat(all_real_data, dim=0).numpy() # (B, T, 2d) if use_volatility
     scaled_contexts = (raw_contexts - data_mean_tensor) / data_std_tensor
     
     gen = build_generator(cfg.model).to(device)
@@ -262,8 +273,16 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
             generated_scaled_list.append(gen_batch)
             
     generated_scaled = torch.cat(generated_scaled_list, dim=0)
-    gen_returns = generated_scaled.cpu().numpy() * data_std_np + data_mean_np # (B, T, d)
+    gen_data = generated_scaled.cpu().numpy() * data_std_np + data_mean_np 
     
+    d = cfg.model.d
+    if use_volatility:
+        real_returns = real_data[..., :d]
+        gen_returns = gen_data[..., :d]
+    else:
+        real_returns = real_data
+        gen_returns = gen_data
+
     print("\n" + "=" * 50)
     print("      DISTRIBUTIONAL METRICS EVALUATION")
     print("=" * 50)

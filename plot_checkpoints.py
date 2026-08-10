@@ -15,9 +15,17 @@ def visualize_checkpoints():
 
     print(f"Loading dataset from {cfg.train.dataset_path}...")
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
-    hist_path = data_dict["train_path"]
     
-    dataset = FinancialTimeSeriesDataset(hist_path, q=cfg.model.q_len, T=cfg.model.T_len)
+    use_volatility = getattr(cfg.train, 'use_volatility', False)
+    
+    if use_volatility and "train_vol" in data_dict:
+        print("Volatility usage ENABLED. Concatenating returns and volatility paths for plotting...")
+        hist_data = torch.cat([data_dict["train_path"], data_dict["train_vol"]], dim=-1)
+    else:
+        print("Using standard returns path...")
+        hist_data = data_dict["train_path"]
+    
+    dataset = FinancialTimeSeriesDataset(hist_data, q=cfg.model.q_len, T=cfg.model.T_len)
 
     gen = build_generator(cfg.model).to(device)
     save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
@@ -43,7 +51,7 @@ def visualize_checkpoints():
             generator=gen,
             dataset=dataset,
             device=device,
-            path_tensor=hist_path,
+            path_tensor=hist_data,  # Pass the joint data here too
             save_path=pdf_path 
         )
 
@@ -62,9 +70,8 @@ def visualize_checkpoints():
             generator=gen,
             dataset=dataset,
             device=device,
-            path_tensor=hist_path,
+            path_tensor=hist_data,
             save_path=final_pdf_path 
         )
-
 if __name__ == "__main__":
     visualize_checkpoints()

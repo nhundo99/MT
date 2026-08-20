@@ -22,21 +22,34 @@ def train_sock_generator(
     sock_extractor.to(device)
     
     optimizer = torch.optim.AdamW(generator.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
-    
-    warmup_steps = int(0.05 * cfg.train.total_steps)
-    decay_start = int(0.30 * cfg.train.total_steps)
-    
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            return float(current_step) / float(max(1, warmup_steps))
-        elif current_step < decay_start:
-            return 1.0
-        else:
-            decay_steps = cfg.train.total_steps - decay_start
-            steps_passed = current_step - decay_start
-            return max(0.0, float(decay_steps - steps_passed) / float(max(1, decay_steps)))
-            
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    sock_warmup = cfg.train.sock_warm_up
+    short_horizon = sock_warmup + cfg.train.short_horizon_steps
+
+    if cfg.train.scheduler == "linear":
+        warmup_steps = int(cfg.train.warm_up_scheduler * cfg.train.total_steps)
+        decay_start = int(cfg.train.decay_start_scheduler * cfg.train.total_steps)
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            elif current_step < decay_start:
+                return 1.0
+            else:
+                decay_steps = cfg.train.total_steps - decay_start
+                steps_passed = current_step - decay_start
+                return max(0.0, float(decay_steps - steps_passed) / float(max(1, decay_steps)))
+                
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    elif cfg.train.scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=cfg.train.T_0,  
+            T_mult=cfg.train.T_mult,   
+            eta_min=cfg.train.eta_min 
+        )
+    else:
+        raise ValueError(f"Unknown scheduler type: {cfg.train.scheduler}")
     
     generator.train()
 
@@ -83,7 +96,14 @@ def train_sock_generator(
         loss = loss_sock
         
         # Drift Regularization
-        if cfg.train.regularize_drift:
+        if cfg.train.regularize_drift and step_count >= sock_warmup:
+            if step_count < short_horizon:
+                alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
+                current_lambda = cfg.train.lambda_reg * alpha
+            else:
+                current_lambda = cfg.train.lambda_reg
+
+            
             if cfg.train.drift_control_type == "conditional":
                 generated_drift = x_hat_plus.mean(dim=1)
                 real_drift = x_plus.mean(dim=1)
@@ -132,8 +152,17 @@ def train_sock_generator(
                 
                 q = current_context.size(1)
                 T = x_plus.size(1)
-                
-                H = cfg.train.long_mc_horizon 
+
+                # 2. Smoothly increase the horizon H
+                base_H = 252
+                if step_count < sock_warmup:
+                    H = base_H
+                elif step_count < short_horizon:
+                    alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
+                    target_H = cfg.train.long_mc_horizon
+                    H = int(base_H + alpha * (target_H - base_H))
+                else:
+                    H = cfg.train.long_mc_horizon
                 
                 mc_fake_scaled_list = []
                 steps_generated = 0
@@ -148,9 +177,7 @@ def train_sock_generator(
                     current_context = combined_context[:, -q:, :]
                 
                 mc_fake_scaled_full = torch.cat(mc_fake_scaled_list, dim=1)[:, :H, :]
-                
                 mc_fake_returns_full = mc_fake_scaled_full * data_std.to(device) + data_mean.to(device)
-                
                 mc_annualized_drift = mc_fake_returns_full.mean(dim=(0, 1)) * 252.0
                 
                 sim_type = ds_cfg.get("simulator", "GBM")
@@ -159,26 +186,29 @@ def train_sock_generator(
                 
                 if sim_type == "GBM":
                     adjusted_target = true_mu - (0.5 * (true_sigma ** 2))
-                    
                 elif sim_type == "JumpDiffusion":
                     jump_intensity = ds_cfg.get("jump_intensity", 0.0)
                     jump_mean = ds_cfg.get("jump_mean", 0.0)
                     adjusted_target = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
-                    
                 else:
-                    raise ValueError(f"Unknown simulator type for target drift calculation: {sim_type}")
+                    raise ValueError(f"Unknown simulator type: {sim_type}")
 
                 target_tensor = torch.tensor(adjusted_target, device=device).expand_as(mc_annualized_drift)
                 loss_drift = torch.nn.functional.mse_loss(mc_annualized_drift, target_tensor)
-                print(f"the adjusted target drift is: {target_tensor}")
-                print(f"the annualized drift is: {mc_annualized_drift}")
                 
             else:
                 raise ValueError(f"Unknown drift control type: {cfg.train.drift_control_type}")
 
-            loss = loss + (cfg.train.lambda_reg * loss_drift)
+            # Apply the annealed lambda
+            loss = loss + (current_lambda * loss_drift)
+        else:
+            loss_drift = torch.tensor(0.0, device=device)
+            current_lambda = 0.0
         
         loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+        
         optimizer.step()
         scheduler.step()
         

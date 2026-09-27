@@ -67,7 +67,7 @@ sock = SOCK(
     mix_dim=cfg.model.M,
     kernel_len=cfg.model.L,
     kernel_width=cfg.model.W,
-    augs=("cumsum", "posneg", "diff")  
+    augs=cfg.model.augs
 ) 
 gen = build_generator(cfg.model).to(device)
 

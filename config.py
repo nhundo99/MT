@@ -10,7 +10,7 @@ class BaseDataConfig:
     H: int = 2048
     J: int = 2048
     N: int = 2048
-    mu: float = 0.05
+    mu: float = 0.09
     sigma: float = 0.2
     corr_matrix: list = field(default_factory=lambda: [
         [1.0, 0.6, 0.3],
@@ -64,12 +64,24 @@ class ModelConfig:
     L: int = 9
     generator_type: str = "standard"  # if changes to generator are needed. Options: "standard"
 
+    augs: tuple = ("cumsum", "posneg", "diff")
+
 @dataclass
 class TrainConfig:
+    scheduler: str = "linear" # cosine, linear
+
+    # cosine scheduler
+    T_0: int = 10000
+    T_mult: int = 2
+    eta_min: float = 1e-6
+
+    warm_up_scheduler: float = 0.05
+    decay_start_scheduler: float = 0.30
+
     batch_size: int = 256
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
-    total_steps: int = 100000
+    total_steps: int = 50000
     resample_freq: int = 100
     log_freq: int = 10
     save_freq: int = 10000
@@ -77,14 +89,16 @@ class TrainConfig:
     use_volatility: bool = False
     
     # --- Drift Regularization ---
-    regularize_drift: bool = False
+    curriculum_learning: bool = True
+    regularize_drift: bool = True
     drift_control_type: str = "long_monte_carlo"  # Options: "global", "conditional", "monte_carlo", "long_monte_carlo"
-    long_mc_horizon: int = 1004
-    lambda_reg: float = 5.0
-    mc_samples: int = 1000
-    target_drift: float = 0.0
+    long_mc_horizon: int = 2048
+    lambda_reg: float = 50.0
+    mc_samples: int = 256
+    sock_warm_up: int = 40000
+    short_horizon_steps: int = 10000
     
-    experiment_name: str = "baseline_no_vol"
+    experiment_name: str = "baseline_curriculum_short"
     tb_base_dir: str = "../results/runs"
     model_base_dir: str = "../results/checkpoints"
     
@@ -95,14 +109,14 @@ class TrainConfig:
 @dataclass
 class Config:
     seed: int = 42
-    dataset_name: str = "Hestonv1" 
+    dataset_name: str = "JD_wrong_drift" 
     
     # --- Evaluation Override ---
     # Leave empty ("") when training a new model.
     # Paste the exact folder name here when running analysis scripts!
-    eval_run_name: str = "20260809_1447_Hestonv1_baseline_no_vol" 
+    eval_run_name: str = "20260919_1951_JD_wrong_drift_baseline_curriculum_short" 
     
-    data: BaseDataConfig = field(default_factory=HestonDataConfig) 
+    data: BaseDataConfig = field(default_factory=JDDataConfig) 
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 

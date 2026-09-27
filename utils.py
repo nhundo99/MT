@@ -89,3 +89,27 @@ def seed_everything(seed: int = 42):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+def run_lightweight_validation(generator, init_context, data_mean, data_std, q, T_chunk, total_steps):
+    """Generates paths recursively and calculates the mean annualized drift."""
+    generator.eval()
+    b_paths = []
+    steps_done = 0
+    current_context = init_context.clone()
+    
+    with torch.no_grad():
+        while steps_done < total_steps:
+            next_chunk_scaled = generator(current_context, n_steps=T_chunk)
+            b_paths.append(next_chunk_scaled)
+            steps_done += T_chunk
+            current_context = next_chunk_scaled[:, -q:, :]
+            
+        b_generated_scaled = torch.cat(b_paths, dim=1)[:, :total_steps, :]
+        b_generated_returns = b_generated_scaled * data_std + data_mean
+        
+        # Calculate annualized drift for feature 0 (matching your eval script)
+        trading_days_per_year = 252.0
+        path_annualized_drifts = b_generated_returns[:, :, 0].mean(dim=1) * trading_days_per_year
+        
+    generator.train() # Immediately return to training mode
+    return path_annualized_drifts.mean().item()

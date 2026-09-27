@@ -32,7 +32,7 @@ def visualize_checkpoints():
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     
-    checkpoints_to_plot = [10000, 50000, 100000]
+    checkpoints_to_plot = [10000, 20000, 30000]
 
     for step in checkpoints_to_plot:
         ckpt_path = os.path.join(save_dir, f"generator_step_{step}.pt")

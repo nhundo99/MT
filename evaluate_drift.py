@@ -49,7 +49,19 @@ def evaluate_model_drift(generator_step = "generator_final.pt"):
     
     true_mu = dataset_config.get("mu", 0.0)
     true_sigma = dataset_config.get("sigma", 0.0)
-    theoretical_target_drift = true_mu - (0.5 * (true_sigma ** 2))
+    sim_type = dataset_config.get("simulator", "GBM")
+    
+    if sim_type == "GBM":
+        theoretical_target_drift = true_mu - (0.5 * (true_sigma ** 2))
+        
+    elif sim_type == "JumpDiffusion":
+        jump_intensity = dataset_config.get("jump_intensity", 0.0)
+        jump_mean = dataset_config.get("jump_mean", 0.0)
+        theoretical_target_drift = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
+        
+    else:
+        # Fallback just in case
+        theoretical_target_drift = true_mu - (0.5 * (true_sigma ** 2))
     
     raw_init_context = test_paths[:n_paths, :q, :].to(device)
     current_context = (raw_init_context - data_mean) / data_std

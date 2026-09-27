@@ -4,11 +4,10 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import cramervonmises_2samp
-
+import glob
 from SOCK import *
 from config import Config
 from utils import seed_everything
-
 
 # -------------------------------------------------------------------------
 # 1. Metric Helper Functions
@@ -23,7 +22,6 @@ def compute_cvm_distance(real_returns: np.ndarray, gen_returns: np.ndarray) -> f
     d = real_returns.shape[-1]
     real_flat = real_returns.reshape(-1, d)
     gen_flat = gen_returns.reshape(-1, d)
-
     N = real_flat.shape[0]
     M = gen_flat.shape[0]
     scipy_scaling_factor = (N * M) / (N + M)
@@ -35,7 +33,6 @@ def compute_cvm_distance(real_returns: np.ndarray, gen_returns: np.ndarray) -> f
         cvm_scores.append(unscaled_distance)
         
     return float(np.mean(cvm_scores))
-
 
 def compute_acf_difference(real_returns: np.ndarray, gen_returns: np.ndarray, l_max: int) -> float:
     """
@@ -61,10 +58,8 @@ def compute_acf_difference(real_returns: np.ndarray, gen_returns: np.ndarray, l_
 
     acf_real = calc_panel_acf(real_returns)
     acf_gen = calc_panel_acf(gen_returns)
-
     abs_diff = np.abs(acf_real - acf_gen)
     return float(np.mean(abs_diff))
-
 
 def compute_ccf_difference(real_returns: np.ndarray, gen_returns: np.ndarray) -> float:
     """
@@ -86,7 +81,6 @@ def compute_ccf_difference(real_returns: np.ndarray, gen_returns: np.ndarray) ->
     diff = np.abs(corr_real[mask] - corr_gen[mask])
     
     return float(np.mean(diff))
-
 
 def compute_es_difference(real_returns: np.ndarray, gen_returns: np.ndarray, alpha: float = 0.05) -> float:
     """
@@ -112,7 +106,42 @@ def compute_es_difference(real_returns: np.ndarray, gen_returns: np.ndarray, alp
         
     return float(np.mean(es_diffs))
 
-def plot_jump_diagnostics(real_returns: np.ndarray, gen_returns: np.ndarray):
+def compute_leverage_effect_difference(real_returns: np.ndarray, gen_returns: np.ndarray, max_lag: int = 15) -> float:
+    """
+    Leverage Effect Discrepancy:
+    Calculates average absolute difference between the leverage effect profiles 
+    L(tau) = Corr(r_t, r_{t+tau}^2) of real and generated returns up to max_lag.
+    """
+    B, T, d = real_returns.shape
+    if max_lag >= T:
+        max_lag = T - 1
+
+    def calc_leverage_profile(data: np.ndarray) -> np.ndarray:
+        lev = np.zeros((d, max_lag))
+        for j in range(d):
+            r = data[:, :, j]
+            r2 = r ** 2
+            
+            r_mean = np.mean(r)
+            r2_mean = np.mean(r2)
+            
+            r_centered = r - r_mean
+            r2_centered = r2 - r2_mean
+            
+            # Pearson correlation denominator across the panel
+            denom = np.sqrt(np.sum(r_centered**2) * np.sum(r2_centered**2)) + 1e-12
+            
+            for k in range(1, max_lag + 1):
+                num = np.sum(r_centered[:, :-k] * r2_centered[:, k:])
+                lev[j, k - 1] = num / denom
+        return lev
+        
+    lev_real = calc_leverage_profile(real_returns)
+    lev_gen = calc_leverage_profile(gen_returns)
+    abs_diff = np.abs(lev_real - lev_gen)
+    return float(np.mean(abs_diff))
+
+def plot_jump_diagnostics(real_returns: np.ndarray, gen_returns: np.ndarray, save_path: str = "jump_diagnostics.pdf"):
     """
     Plots individual path realizations and log-scaled histograms 
     to diagnose jump-generation failures.
@@ -136,20 +165,25 @@ def plot_jump_diagnostics(real_returns: np.ndarray, gen_returns: np.ndarray):
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig("jump_diagnostics.pdf", format='pdf', bbox_inches='tight')
-    plt.show()
+    plt.savefig(save_path, format='pdf', bbox_inches='tight')
+    plt.close(fig)
 
-def analyze_jump_behavior(real_returns: np.ndarray, gen_returns: np.ndarray, threshold: float = 0.03):
+def analyze_jump_behavior(real_returns: np.ndarray, gen_returns: np.ndarray, std_multiplier: float = 2.0):
     """
     Analyzes the frequency and size of jumps in the returns data.
-    Uses a threshold to filter out the 'fuzzy zeros' produced by continuous NNs.
+    Uses a dynamic threshold based on the standard deviation of real returns 
+    to filter out the 'fuzzy zeros' produced by continuous NNs.
     """
-    print("\n" + "=" * 50)
-    print(f"      JUMP BEHAVIOR ANALYSIS (Threshold = {threshold})")
-    print("=" * 50)
-    
     real_asset = real_returns[:, :, 0]
     gen_asset = gen_returns[:, :, 0]
+    
+    # Calculate the threshold dynamically (e.g., 2 * std of real returns)
+    real_std_global = np.std(real_asset)
+    threshold = std_multiplier * real_std_global
+    
+    print("\n" + "=" * 50)
+    print(f"      JUMP BEHAVIOR ANALYSIS (Threshold = {std_multiplier}x std = {threshold:.6f})")
+    print("=" * 50)
     
     real_jump_mask = np.abs(real_asset) > threshold
     gen_jump_mask = np.abs(gen_asset) > threshold
@@ -160,8 +194,11 @@ def analyze_jump_behavior(real_returns: np.ndarray, gen_returns: np.ndarray, thr
     real_jump_sizes = real_asset[real_jump_mask]
     gen_jump_sizes = gen_asset[gen_jump_mask]
     
-    real_mean, real_std = np.mean(real_jump_sizes), np.std(real_jump_sizes)
-    
+    if len(real_jump_sizes) > 0:
+        real_mean, real_std = np.mean(real_jump_sizes), np.std(real_jump_sizes)
+    else:
+        real_mean, real_std = 0.0, 0.0
+        
     if len(gen_jump_sizes) > 0:
         gen_mean, gen_std = np.mean(gen_jump_sizes), np.std(gen_jump_sizes)
     else:
@@ -172,26 +209,16 @@ def analyze_jump_behavior(real_returns: np.ndarray, gen_returns: np.ndarray, thr
     print(f"Conditional Jump Volatility: Real = {real_std:.4f} | Gen = {gen_std:.4f}")
     print("=" * 50)
     
-    plt.figure(figsize=(10, 6))
-    
-    plt.hist(real_jump_sizes, bins=50, alpha=0.5, label='Real Jumps', color='black', density=True)
-    
-    if len(gen_jump_sizes) > 0:
-        plt.hist(gen_jump_sizes, bins=50, alpha=0.5, label='Generated Jumps', color='red', density=True)
-    
-    plt.axvline(threshold, color='blue', linestyle='--', linewidth=1, label='+Threshold')
-    plt.axvline(-threshold, color='blue', linestyle='--', linewidth=1, label='-Threshold')
-    
-    plt.title(f"Conditional Distribution of Jump Sizes (Returns > {threshold})")
-    plt.xlabel("Return Size")
-    plt.ylabel("Density")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    plt.savefig("jump_size_distribution.pdf", format='pdf', bbox_inches='tight')
-    plt.show()
-
+    return {
+        "threshold_multiplier": std_multiplier,
+        "threshold_value": float(threshold),
+        "real_jumps_per_year": float(real_jumps_per_year),
+        "gen_jumps_per_year": float(gen_jumps_per_year),
+        "real_mean": float(real_mean),
+        "gen_mean": float(gen_mean),
+        "real_std": float(real_std),
+        "gen_std": float(gen_std)
+    }
 
 # -------------------------------------------------------------------------
 # 2. Main Evaluation Pipeline
@@ -204,10 +231,27 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Running evaluation on device: {device}")
     
+    run_name = getattr(cfg, 'eval_run_name', cfg.train.experiment_name)
+    save_dir = os.path.join(cfg.train.model_base_dir, run_name)
+    
+    plots_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    if str(checkpoint_name).lower() == "all":
+        ckpt_pattern = os.path.join(save_dir, "*.pt")
+        ckpt_paths = glob.glob(ckpt_pattern)
+        if not ckpt_paths:
+            raise FileNotFoundError(f"No checkpoint files found matching pattern {ckpt_pattern}")
+        ckpt_paths = sorted(ckpt_paths)
+    else:
+        ckpt_path = os.path.join(save_dir, checkpoint_name)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
+        ckpt_paths = [ckpt_path]
+        
     print(f"Loading dataset from {cfg.train.dataset_path}...")
     data_dict = torch.load(cfg.train.dataset_path, map_location="cpu")
     
-    # 1. Conditionally load and concatenate volatility for testing
     use_volatility = getattr(cfg.train, 'use_volatility', False)
     
     if use_volatility and "train_vol" in data_dict and "test_vols" in data_dict:
@@ -218,24 +262,17 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
         print("Using standard returns path...")
         train_data = data_dict["train_path"]
         test_data = data_dict["test_paths"]
-    
-    save_dir = os.path.join(cfg.train.model_base_dir, cfg.train.experiment_name)
-    ckpt_path = os.path.join(save_dir, checkpoint_name)
-    
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
         
-    print(f"Loading checkpoint: {ckpt_path}...")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    
-    # 2. Compute mean/std based on the joint train_data if missing
-    if 'data_mean' in checkpoint and 'data_std' in checkpoint:
-        data_mean_tensor = checkpoint['data_mean'].to(device)
-        data_std_tensor = checkpoint['data_std'].to(device)
+    print(f"Extracting scale parameters from the first checkpoint...")
+    first_ckpt = torch.load(ckpt_paths[0], map_location=device)
+    if 'data_mean' in first_ckpt and 'data_std' in first_ckpt:
+        data_mean_tensor = first_ckpt['data_mean'].to(device)
+        data_std_tensor = first_ckpt['data_std'].to(device)
     else:
         print("Warning: data_mean/data_std missing in checkpoint. Calculating from train path...")
         data_mean_tensor = train_data.mean(dim=0, keepdim=True).to(device)
         data_std_tensor = train_data.std(dim=0, keepdim=True).to(device) + 1e-6
+    del first_ckpt
         
     data_mean_np = data_mean_tensor.cpu().numpy()
     data_std_np = data_std_tensor.cpu().numpy()
@@ -252,75 +289,112 @@ def evaluate_distributional_metrics(checkpoint_name: str = "generator_final.pt")
         all_real_data.append(test_data[:, t + q : t + q + T, :])
         
     raw_contexts = torch.cat(all_raw_contexts, dim=0).to(device)
-    real_data = torch.cat(all_real_data, dim=0).numpy() # (B, T, 2d) if use_volatility
+    real_data = torch.cat(all_real_data, dim=0).numpy()
     scaled_contexts = (raw_contexts - data_mean_tensor) / data_std_tensor
-    
-    gen = build_generator(cfg.model).to(device)
-    if 'generator_state_dict' in checkpoint:
-        gen.load_state_dict(checkpoint['generator_state_dict'])
-    else:
-        gen.load_state_dict(checkpoint)
-    gen.eval()
-    
-    print(f"Generating synthetic paths for {len(scaled_contexts)} evaluation segments...")
-    batch_size = 2048
-    generated_scaled_list = []
-    
-    with torch.no_grad():
-        for i in range(0, len(scaled_contexts), batch_size):
-            batch_contexts = scaled_contexts[i : i + batch_size]
-            gen_batch = gen(batch_contexts, n_steps=T)
-            generated_scaled_list.append(gen_batch)
-            
-    generated_scaled = torch.cat(generated_scaled_list, dim=0)
-    gen_data = generated_scaled.cpu().numpy() * data_std_np + data_mean_np 
     
     d = cfg.model.d
     if use_volatility:
         real_returns = real_data[..., :d]
-        gen_returns = gen_data[..., :d]
     else:
         real_returns = real_data
-        gen_returns = gen_data
-
-    print("\n" + "=" * 50)
-    print("      DISTRIBUTIONAL METRICS EVALUATION")
-    print("=" * 50)
-    
-    l_max = int(np.floor(T / 3))
-    
-    cvm_val = compute_cvm_distance(real_returns, gen_returns)
-    acf_val = compute_acf_difference(real_returns, gen_returns, l_max=l_max)
-    ccf_val = compute_ccf_difference(real_returns, gen_returns)
-    es_val  = compute_es_difference(real_returns, gen_returns, alpha=0.05)
-    
-    results = {
-        "CVM": round(cvm_val, 6),
-        "ACF": round(acf_val, 6),
-        "CCF": round(ccf_val, 6),
-        "ES": round(es_val, 6),
-        "num_segments_evaluated": len(real_returns),
-        "rollout_horizon_T": T,
-        "context_length_q": q,
-    }
-    
-    print(f"Cramér-von Mises (CVM):         {results['CVM']:.6f}")
-    print(f"Autocorrelation Diff (ACF):    {results['ACF']:.6f}")
-    print(f"Cross-Correlation Diff (CCF):  {results['CCF']:.6f}")
-    print(f"Expected Shortfall Diff (ES):  {results['ES']:.6f}")
-    print("=" * 50)
-    
-    json_path = os.path.join(save_dir, "distributional_metrics.json")
-    with open(json_path, "w") as f:
-        json.dump(results, f, indent=4)
         
-    print(f"\nSaved statistical metrics to: {json_path}\n")
-    plot_jump_diagnostics(real_returns, gen_returns)
-    analyze_jump_behavior(real_returns, gen_returns, threshold=0.03)
-    return results
-
-
-
+    all_results = {}
+    
+    for ckpt_path in ckpt_paths:
+        step_name = os.path.basename(ckpt_path)
+        print(f"\nEvaluating checkpoint: {step_name}...")
+        
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        gen = build_generator(cfg.model).to(device)
+        if 'generator_state_dict' in checkpoint:
+            gen.load_state_dict(checkpoint['generator_state_dict'])
+        else:
+            gen.load_state_dict(checkpoint)
+        gen.eval()
+        
+        print(f"Generating synthetic paths for {len(scaled_contexts)} evaluation segments...")
+        batch_size = 2048
+        generated_scaled_list = []
+        
+        with torch.no_grad():
+            for i in range(0, len(scaled_contexts), batch_size):
+                batch_contexts = scaled_contexts[i : i + batch_size]
+                gen_batch = gen(batch_contexts, n_steps=T)
+                generated_scaled_list.append(gen_batch)
+                
+        generated_scaled = torch.cat(generated_scaled_list, dim=0)
+        gen_data = generated_scaled.cpu().numpy() * data_std_np + data_mean_np
+        
+        if use_volatility:
+            gen_returns = gen_data[..., :d]
+        else:
+            gen_returns = gen_data
+            
+        print("\n" + "=" * 50)
+        print(f"      DISTRIBUTIONAL METRICS: {step_name}")
+        print("=" * 50)
+        
+        l_max = int(np.floor(T / 3))
+        
+        cvm_val = compute_cvm_distance(real_returns, gen_returns)
+        acf_val = compute_acf_difference(real_returns, gen_returns, l_max=l_max)
+        ccf_val = compute_ccf_difference(real_returns, gen_returns)
+        es_val  = compute_es_difference(real_returns, gen_returns, alpha=0.05)
+        
+        # New Volatility Clustering and Leverage Effect metrics
+        acf_abs_val = compute_acf_difference(np.abs(real_returns), np.abs(gen_returns), l_max=l_max)
+        acf_sq_val  = compute_acf_difference(real_returns**2, gen_returns**2, l_max=l_max)
+        lev_val     = compute_leverage_effect_difference(real_returns, gen_returns, max_lag=min(15, l_max))
+        
+        jump_metrics = analyze_jump_behavior(real_returns, gen_returns, std_multiplier=2.0)
+        
+        results = {
+            "run_name": run_name,
+            "CVM": round(float(cvm_val), 6),
+            "ACF": round(float(acf_val), 6),
+            "CCF": round(float(ccf_val), 6),
+            "ES": round(float(es_val), 6),
+            "ACF_abs": round(float(acf_abs_val), 6),
+            "ACF_sq": round(float(acf_sq_val), 6),
+            "Leverage": round(float(lev_val), 6),
+            "num_segments_evaluated": len(real_returns),
+            "rollout_horizon_T": T,
+            "context_length_q": q,
+            "jump_metrics": jump_metrics
+        }
+        
+        all_results[step_name] = results
+        
+        print(f"Cramér-von Mises (CVM):        {results['CVM']:.6f}")
+        print(f"Autocorrelation Diff (ACF):    {results['ACF']:.6f}")
+        print(f"Cross-Correlation Diff (CCF):  {results['CCF']:.6f}")
+        print(f"Expected Shortfall Diff (ES):  {results['ES']:.6f}")
+        print(f"Volatility ACF (Abs) Diff:     {results['ACF_abs']:.6f}")
+        print(f"Volatility ACF (Sq) Diff:      {results['ACF_sq']:.6f}")
+        print(f"Leverage Effect Diff:          {results['Leverage']:.6f}")
+        print("=" * 50)
+        
+        base_name = os.path.splitext(step_name)[0]
+        
+        json_path = os.path.join(save_dir, f"distributional_metrics_{base_name}.json")
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=4)
+            
+        print(f"\nSaved statistical metrics to: {json_path}")
+        
+        jump_json_path = os.path.join(save_dir, f"jump_behavior_{base_name}.json")
+        with open(jump_json_path, "w") as f:
+            json.dump(jump_metrics, f, indent=4)
+            
+        print(f"Saved jump statistics to: {jump_json_path}\n")
+        
+    if str(checkpoint_name).lower() == "all":
+        summary_path = os.path.join(save_dir, "distributional_metrics_summary.json")
+        with open(summary_path, "w") as f:
+            json.dump(all_results, f, indent=4)
+        print(f"Saved aggregated summary metrics to: {summary_path}")
+        
+    return all_results
 
 if __name__ == "__main__":
-    evaluate_distributional_metrics()
+    evaluate_distributional_metrics(checkpoint_name="all")

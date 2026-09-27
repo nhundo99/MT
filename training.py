@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import os
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
+from utils import run_lightweight_validation
 from dataclasses import asdict
 
 def train_sock_generator(
@@ -18,13 +20,43 @@ def train_sock_generator(
     dataset = torch.load(cfg.train.dataset_path, map_location="cpu")
     ds_cfg = dataset.get("dataset_config", {})  
     
+    # ==========================================
+    # --- 50-Step Validation Protocol Setup ---
+    # ==========================================
+    sim_type = ds_cfg.get("simulator", "GBM")
+    true_mu = ds_cfg.get("mu", 0.0)
+    true_sigma = ds_cfg.get("sigma", 0.0)
+    
+    if sim_type == "GBM":
+        theoretical_target = true_mu - (0.5 * (true_sigma ** 2))
+    elif sim_type == "JumpDiffusion":
+        jump_intensity = ds_cfg.get("jump_intensity", 0.0)
+        jump_mean = ds_cfg.get("jump_mean", 0.0)
+        theoretical_target = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
+    else:
+        theoretical_target = true_mu - (0.5 * (true_sigma ** 2))
+
+    val_n_paths = min(1000, dataset["test_paths"].shape[0])
+    val_years = 8.0 # 1-year horizon keeps it fast enough for 50 repeated steps
+    val_total_steps = int(val_years * 252)
+    val_drift_history = []
+    
+    raw_val_context = dataset["test_paths"][:val_n_paths, :cfg.model.q_len, :].to(device)
+    val_context = (raw_val_context - data_mean.to(device)) / data_std.to(device)
+    # ==========================================
+    
     generator.to(device)
     sock_extractor.to(device)
     
     optimizer = torch.optim.AdamW(generator.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.weight_decay)
 
-    sock_warmup = cfg.train.sock_warm_up
-    short_horizon = sock_warmup + cfg.train.short_horizon_steps
+    if cfg.train.curriculum_learning:
+        sock_warmup = cfg.train.sock_warm_up
+        short_horizon = sock_warmup + cfg.train.short_horizon_steps
+    else:
+        # Start drift regularization immediately
+        sock_warmup = 0
+        short_horizon = 0
 
     if cfg.train.scheduler == "linear":
         warmup_steps = int(cfg.train.warm_up_scheduler * cfg.train.total_steps)
@@ -97,12 +129,14 @@ def train_sock_generator(
         
         # Drift Regularization
         if cfg.train.regularize_drift and step_count >= sock_warmup:
-            if step_count < short_horizon:
-                alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
-                current_lambda = cfg.train.lambda_reg * alpha
+            if cfg.train.curriculum_learning:
+                if step_count < short_horizon:
+                    alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
+                    current_lambda = cfg.train.lambda_reg * alpha
+                else:
+                    current_lambda = cfg.train.lambda_reg
             else:
                 current_lambda = cfg.train.lambda_reg
-
             
             if cfg.train.drift_control_type == "conditional":
                 generated_drift = x_hat_plus.mean(dim=1)
@@ -148,33 +182,37 @@ def train_sock_generator(
             
             elif cfg.train.drift_control_type == "long_monte_carlo":
                 num_repeats = max(1, cfg.train.mc_samples // x_minus.size(0))
-                current_context = x_minus.repeat(num_repeats, 1, 1)
+                current_context_reg = x_minus.repeat(num_repeats, 1, 1)
                 
-                q = current_context.size(1)
+                q = current_context_reg.size(1)
                 T = x_plus.size(1)
 
-                # 2. Smoothly increase the horizon H
-                base_H = 252
-                if step_count < sock_warmup:
-                    H = base_H
-                elif step_count < short_horizon:
-                    alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
-                    target_H = cfg.train.long_mc_horizon
-                    H = int(base_H + alpha * (target_H - base_H))
+                # Horizon H logic based on curriculum flag
+                if cfg.train.curriculum_learning:
+                    # Smoothly increase the horizon H
+                    base_H = 252
+                    # Note: step_count < sock_warmup is always False here due to the outer if statement
+                    if step_count < short_horizon:
+                        alpha = (step_count - sock_warmup) / max(1, short_horizon - sock_warmup)
+                        target_H = cfg.train.long_mc_horizon
+                        H = int(base_H + alpha * (target_H - base_H))
+                    else:
+                        H = cfg.train.long_mc_horizon
                 else:
+                    # Normal approach: use the full long-term horizon immediately
                     H = cfg.train.long_mc_horizon
                 
                 mc_fake_scaled_list = []
                 steps_generated = 0
                 
                 while steps_generated < H:
-                    next_T = generator(current_context, n_steps=T)
+                    next_T = generator(current_context_reg, n_steps=T)
                     mc_fake_scaled_list.append(next_T)
                     
                     steps_generated += T
                     
-                    combined_context = torch.cat([current_context, next_T], dim=1)
-                    current_context = combined_context[:, -q:, :]
+                    combined_context = torch.cat([current_context_reg, next_T], dim=1)
+                    current_context_reg = combined_context[:, -q:, :]
                 
                 mc_fake_scaled_full = torch.cat(mc_fake_scaled_list, dim=1)[:, :H, :]
                 mc_fake_returns_full = mc_fake_scaled_full * data_std.to(device) + data_mean.to(device)
@@ -190,6 +228,9 @@ def train_sock_generator(
                     jump_intensity = ds_cfg.get("jump_intensity", 0.0)
                     jump_mean = ds_cfg.get("jump_mean", 0.0)
                     adjusted_target = true_mu - (0.5 * (true_sigma ** 2)) + (jump_intensity * jump_mean)
+                elif sim_type == "Heston":
+                    theta_var = ds_cfg.get("theta_var", true_sigma ** 2)
+                    adjusted_target = true_mu - (0.5 * theta_var)
                 else:
                     raise ValueError(f"Unknown simulator type: {sim_type}")
 
@@ -214,6 +255,23 @@ def train_sock_generator(
         
         loss_history.append(loss.item())
         step_count += 1
+        
+        # =================================================================
+        # --- LIGHTWEIGHT VALIDATION TRIGGER (50 steps before save) ---
+        # =================================================================
+        modulo = step_count % cfg.train.save_freq
+        if step_count > 0 and (modulo == 0 or modulo > cfg.train.save_freq - 50):
+            val_drift = run_lightweight_validation(
+                generator=generator,
+                init_context=val_context,
+                data_mean=data_mean.to(device),
+                data_std=data_std.to(device),
+                q=cfg.model.q_len,
+                T_chunk=cfg.model.T_len,
+                total_steps=val_total_steps
+            )
+            val_drift_history.append(val_drift)
+        # =================================================================
 
         if step_count % cfg.train.log_freq == 0:
             writer.add_scalar("Loss/train_total", loss.item(), step_count)
@@ -224,7 +282,21 @@ def train_sock_generator(
                 
             writer.add_scalar("LearningRate/train", scheduler.get_last_lr()[0], step_count)
         
-        if step_count % cfg.train.save_freq == 0:
+        if step_count > 0 and step_count % cfg.train.save_freq == 0:
+            
+            # Compute 50-step stats
+            if len(val_drift_history) > 0:
+                mean_drift_50 = float(np.mean(val_drift_history))
+                stderr_drift_50 = float(np.std(val_drift_history) / np.sqrt(len(val_drift_history)))
+                bias_bps_50 = (mean_drift_50 - theoretical_target) * 10000
+                
+                # Log actual validation metrics to TensorBoard
+                writer.add_scalar("Validation/True_Drift_Mean_50steps", mean_drift_50, step_count)
+                writer.add_scalar("Validation/True_Drift_Bias_bps_50steps", bias_bps_50, step_count)
+                writer.add_scalar("Validation/True_Drift_StdErr_50steps", stderr_drift_50, step_count)
+            else:
+                mean_drift_50, stderr_drift_50, bias_bps_50 = 0.0, 0.0, 0.0
+                
             save_path = os.path.join(cfg.train.save_dir, f"generator_step_{step_count}.pt")
             
             torch.save({
@@ -235,10 +307,20 @@ def train_sock_generator(
                 'loss': loss.item(),
                 'config': asdict(cfg),
                 'data_mean': data_mean,
-                'data_std': data_std
+                'data_std': data_std,
+                # Store the validation metrics directly in the checkpoint file!
+                'val_metrics_50_steps': {
+                    'mean_drift': mean_drift_50,
+                    'stderr_drift': stderr_drift_50,
+                    'bias_bps': bias_bps_50,
+                    'target': theoretical_target
+                }
             }, save_path)
             
-            print(f"Checkpoint saved to {save_path}")
+            print(f"Checkpoint saved to {save_path} | Val Drift Bias: {bias_bps_50:.2f} bps ± {stderr_drift_50 * 10000:.2f} bps")
+            
+            # Clear history for the next save cycle
+            val_drift_history.clear()
         # --------------------------------------
             
     final_save_path = os.path.join(cfg.train.save_dir, "generator_final.pt")

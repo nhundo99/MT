@@ -32,10 +32,88 @@ class PosNegAug(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cat([x, torch.relu(x), -torch.relu(-x)], dim=-1)
 
+class AbsAug(nn.Module):
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.n_add_channels = in_channels
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([x, torch.abs(x)], dim=-1)
+
+class SquareAug(nn.Module):
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.n_add_channels = in_channels
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([x, x ** 2], dim=-1)
+
+class RollingVolAug(nn.Module):
+    def __init__(self, in_channels: int, window: int = 126):
+        super().__init__()
+        self.n_add_channels = in_channels
+        self.window = window
+        self.padding = window - 1
+        self.pool = torch.nn.AvgPool1d(kernel_size=window, stride=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, C) -> permute to (B, C, T)
+        x_perm = x.permute(0, 2, 1)
+        x_padded = torch.nn.functional.pad(x_perm, (self.padding, 0), mode='replicate')
+        
+        # Simply compute the rolling average of absolute standardized returns
+        rolling_abs_vol = self.pool(torch.abs(x_padded))
+        
+        # Permute back to (B, T, C) and concatenate
+        return torch.cat([x, rolling_abs_vol.permute(0, 2, 1)], dim=-1)
+
+class DecayVolAug(nn.Module):
+    def __init__(self, in_channels: int, window: int = 63, alpha: float = 0.05):
+        """
+        Exponential Moving Average (EMA) of volatility.
+        window: How far back to look (e.g., 63 days = 1 quarter).
+        alpha: The decay factor. Lower alpha = longer memory (slower decay).
+        """
+        super().__init__()
+        self.n_add_channels = in_channels
+        self.padding = window - 1
+        self.groups = in_channels
+        
+        # 1. Create exponentially decaying weights
+        # We reverse the range so the most recent data point (end of the window) 
+        # gets the weight of 1, and the oldest gets (1-alpha)^(window-1)
+        weights = torch.tensor([(1 - alpha) ** i for i in range(window - 1, -1, -1)]).float()
+        
+        # 2. Normalize so the weights sum to 1 (preserves the scale of volatility)
+        weights = weights / weights.sum()
+        
+        # 3. Reshape for depthwise conv1d: (out_channels, in_channels/groups, kernel_size)
+        weights = weights.view(1, 1, window).repeat(in_channels, 1, 1)
+        
+        # Register as a buffer so it moves to GPU with the model but doesn't get updated by the optimizer
+        self.register_buffer('weights', weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (B, T, C) -> Permute to (B, C, T) for 1D convolution
+        x_perm = x.permute(0, 2, 1)
+        
+        # Apply causal padding to the left side (past) to maintain sequence length
+        x_padded = F.pad(x_perm, (self.padding, 0), mode='replicate')
+        
+        # Apply depthwise convolution over absolute returns (EMA of Volatility)
+        ema_vol = F.conv1d(torch.abs(x_padded), self.weights, groups=self.groups)
+        
+        # Permute back to (B, T, C) and concatenate to original input
+        return torch.cat([x, ema_vol.permute(0, 2, 1)], dim=-1)
+
 AUGMENTATIONS = {
     "cumsum": CumSumAug, 
     "diff": DiffAug, 
-    "posneg": PosNegAug
+    "posneg": PosNegAug,
+    "abs": AbsAug,
+    "squared": SquareAug,
+    "rolling_vol": RollingVolAug,
+    "ema_vol": DecayVolAug
 }
 
 # -------------------------------------------------------------------------
@@ -202,6 +280,55 @@ class StandardGenerator(nn.Module):
         
         return self.proj_out(h)
 
+class ContextGenerator(nn.Module):
+    def __init__(self, d: int, hidden_dim: int = 128, q: int = 5) -> None:
+        super().__init__()
+        self.noise_dim = d
+        self.initial_noise_dim = d
+        
+        # FIX 1: Replace flat Linear layer with a Context Encoder GRU
+        self.context_encoder = nn.GRU(d, hidden_dim, num_layers=1, batch_first=True)
+        
+        # FIX 2: Project the final encoded context + noise to h0
+        self.h0_proj = nn.Sequential(
+            nn.Linear(hidden_dim + self.initial_noise_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        self.proj_in = nn.Linear(self.noise_dim, 2 * hidden_dim)
+        self.rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=1, batch_first=True)
+        
+        self.alpha = nn.Parameter(torch.tensor(0.1))
+        self.gate = nn.Sequential(
+            nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.Sigmoid()
+        )
+        self.proj_out = nn.Linear(hidden_dim, d)
+
+    def forward(self, c: torch.Tensor, n_steps: int = 64) -> torch.Tensor:
+        # c shape: (batch_size, q, d)
+        
+        # 1. Encode the temporal context step-by-step
+        _, h_ctx = self.context_encoder(c) 
+        # h_ctx shape: (1, batch_size, hidden_dim)
+        
+        # 2. Prepare h0 for the decoder
+        h_ctx_flat = h_ctx.squeeze(0) # (batch_size, hidden_dim)
+        initial_noise = torch.randn((c.size(0), self.initial_noise_dim), device=c.device)
+        
+        # Combine temporal memory with initial noise
+        h0_in = torch.cat((h_ctx_flat, initial_noise), dim=-1)
+        h0 = self.h0_proj(h0_in) # (batch_size, hidden_dim)
+        
+        # 3. Generate future steps
+        z = torch.randn((c.size(0), n_steps, self.noise_dim), device=c.device)
+        z, z_skip = self.proj_in(z).chunk(2, dim=-1)
+        
+        h, _ = self.rnn(F.silu(z), h0.unsqueeze(0))
+        h = h + self.alpha * self.gate(h) * z_skip
+        
+        return self.proj_out(h)
+
 # -------------------------------------------------------------------------
 # Factory Function
 # -------------------------------------------------------------------------
@@ -209,5 +336,7 @@ def build_generator(model_cfg) -> nn.Module:
     """Returns the configured generator architecture."""
     if model_cfg.generator_type == "standard":
         return StandardGenerator(d=model_cfg.d, q=model_cfg.q_len, hidden_dim=model_cfg.hidden_dim)
+    elif model_cfg.generator_type == "standard":
+        return ContextGenerator(d=model_cfg.d, q=model_cfg.q_len, hidden_dim=model_cfg.hidden_dim)
     else:
         raise ValueError(f"Unknown generator type: {model_cfg.generator_type}")
